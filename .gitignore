@@ -1,0 +1,24 @@
+# Secrets. Never commit.
+.env
+.env.local
+
+# Terraform state and working dirs
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Generated manifests written by Terraform at apply time
+terraform/**/.generated/
+
+# Kubeconfigs
+kubeconfig
+kubeconfig-*
+
+# macOS
+.DS_Store
