@@ -22,7 +22,7 @@ SHELL := /bin/bash
 # ---------------------------------------------------------------------------
 CLUSTER  := platform
 
-# No target uses CONTEXT yet. Kept because ad-hoc kubectl commands want it.
+# Used by resume. Also here because ad-hoc kubectl commands want it.
 CONTEXT  := k3d-$(CLUSTER)
 
 # CURDIR is the directory make was invoked from, so ENV_FILE is absolute and
@@ -36,7 +36,7 @@ ENV_FILE := $(CURDIR)/.env
 # Declare targets that are names of actions, not files to be built. Without
 # this, a file called `up` appearing in this directory would make `gmake up`
 # say "nothing to be done".
-.PHONY: help check-env cluster-up platform-up up down destroy
+.PHONY: help check-env cluster-up platform-up up pause resume down destroy
 
 # ---------------------------------------------------------------------------
 # help: self-documenting target list.
@@ -118,6 +118,28 @@ platform-up: check-env ## Stage 2: secret, ArgoCD, root application
 # right, which is what enforces cluster-before-platform.
 # ---------------------------------------------------------------------------
 up: cluster-up platform-up ## Full bring-up, in the required order
+
+# ---------------------------------------------------------------------------
+# pause / resume: the cheapest lifecycle pair. Neither one touches Terraform,
+# because nothing about the desired state changes: the node containers are
+# simply stopped and started again.
+#
+# Reach for these when you are stepping away. `down` and `destroy` both throw
+# work away and cost minutes to undo; pause costs seconds and keeps images,
+# PVCs, and the kube context exactly as they were. Quitting OrbStack has the
+# same effect implicitly, so a paused cluster is also what you get after a
+# reboot.
+# ---------------------------------------------------------------------------
+pause: ## Stop the cluster containers, keeping all state
+	k3d cluster stop $(CLUSTER)
+
+resume: ## Start a paused cluster and wait for its nodes
+	k3d cluster start $(CLUSTER)
+# k3d returns as soon as the containers are running, which is well before k3s
+# inside them is serving. Without this wait the next kubectl in your shell
+# tends to fail with a connection refused, which looks like a broken cluster
+# and is not. Pods need another moment beyond this to finish restarting.
+	kubectl --context $(CONTEXT) wait --for=condition=Ready nodes --all --timeout=120s
 
 # ---------------------------------------------------------------------------
 # down: undo stage 2 only. The cluster survives, so this is the cheap way to
