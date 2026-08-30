@@ -1,0 +1,44 @@
+# k3d's own config schema, not Kubernetes YAML. `kind: Simple` is k3d's
+# single-cluster format.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  # Becomes the kube context name, prefixed: k3d-platform.
+  name: platform
+# 1 server (control plane, also schedulable) + 1 agent (worker).
+# agents: 0 works and is leaner; agents: 2 lets you watch pods spread.
+servers: 1
+agents: 1
+# Pinned k3s version. Unpinned, a rebuild months from now would silently
+# give you a different Kubernetes minor version.
+#
+# v1.36.x is the current supported line. v1.31 reached end of life in
+# February 2026 and receives no security patches. This image ships Traefik v3
+# and containerd v2; nothing in this plan depends on the older versions.
+#
+# Note k3d 5.9.0 defaults to v1.35.5-k3s1, so this pin is one minor ahead of
+# what k3d ships. That is supported but not the combination k3d tests most.
+# If cluster creation misbehaves, dropping to v1.35.5-k3s1 is the first thing
+# to try.
+image: rancher/k3s:v1.36.4-k3s1
+ports:
+  # Host 8080 -> the k3d load balancer -> Traefik on port 80 in-cluster.
+  #
+  # This mapping is fixed at CREATION time and cannot be added later. Getting
+  # it wrong means destroy and recreate, which is why it lives in this file
+  # rather than being passed as a flag.
+  - port: 8080:80
+    nodeFilters:
+      # Attach to the load balancer container k3d creates, not to a node.
+      - loadbalancer
+options:
+  k3d:
+    # Do not return until the cluster is up, so Terraform's next step is safe.
+    wait: true
+    timeout: "180s"
+  kubeconfig:
+    # Merge into ~/.kube/config, or into $KUBECONFIG if you have set it.
+    updateDefaultKubeconfig: true
+    # Switches your active context to k3d-platform. Convenient here, and the
+    # exact behaviour to be careful about if you also use kubectl for work.
+    switchCurrentContext: true
