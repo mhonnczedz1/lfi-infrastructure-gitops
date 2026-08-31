@@ -59,3 +59,12 @@ variable "argocd_chart_version" {
   description = "Pinned argo-cd Helm chart version. Verified in Task 1.1.3."
   default     = "10.4.2"
 }
+
+variable "argocd_host" {
+  type        = string
+  # Resolves to 127.0.0.1 on macOS with no /etc/hosts entry, and any *.localhost
+  # name behaves the same way. Host-based routing keeps ArgoCD served from "/",
+  # so no server.rootpath configuration is needed.
+  description = "Hostname Traefik routes to ArgoCD, reachable on port 8080."
+  default     = "argocd.localhost"
+}

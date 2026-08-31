@@ -1,0 +1,30 @@
+# Identical to service-2's apart from the name and path. Notably there is no
+# ordering declared between the three child Applications: ArgoCD syncs them
+# concurrently, and service-1's connect_with_retry is what absorbs Postgres
+# not being ready yet. Sync waves exist if you ever need real ordering.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: service-1
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
+    targetRevision: HEAD
+    path: kubernetes/service-1
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
