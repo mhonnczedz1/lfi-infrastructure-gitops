@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-1
+  labels:
+    app: service-1
+spec:
+  # Two replicas is also what makes the zero-downtime check in Task 8.3.4
+  # meaningful: with one, a rolling update always has a gap.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: service-1
+  template:
+    metadata:
+      labels:
+        app: service-1
+    spec:
+      containers:
+        - name: service-1
+          # Bare name, rewritten by kustomization.yaml's images: block.
+          image: service-1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            # Cluster-internal DNS. No external resolution involved.
+            #
+            # `service-2` is a short name: Kubernetes appends the search
+            # domain, so it resolves within the platform namespace. Note there
+            # is no `lfi-` prefix here; these are Kubernetes Service names,
+            # not repo names.
+            - name: SERVICE_2_URL
+              value: http://service-2:8000
+            # Resolves to the headless Service, which points straight at
+            # postgres-0.
+            - name: POSTGRES_HOST
+              value: postgres
+            # Quoted, because unquoted 5432 is a YAML integer and every
+            # env var value must be a string. Kubernetes rejects the manifest
+            # otherwise.
+            - name: POSTGRES_PORT
+              value: "5432"
+          envFrom:
+            # Supplies POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB.
+            # The password never appears in this file.
+            #
+            # Split deliberately: non-secret config sits in `env` above where
+            # you can read it, secrets come from `envFrom` by reference. Both
+            # end up as env vars that config.py reads identically.
+            - secretRef:
+                name: postgres-credentials
+          livenessProbe:
+            # /healthz, which touches nothing. A database outage must not
+            # cause Kubernetes to start killing otherwise-healthy pods.
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            # readyz touches Postgres, so a pod that cannot reach the
+            # database is pulled from the Service's endpoints.
+            #
+            # This is the one place the liveness/readiness distinction earns
+            # its keep: unready pods stop receiving traffic but keep running,
+            # and recover on their own once Postgres returns.
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            # 6 x 5s = 30s of grace, which covers connect_with_retry working
+            # through a slow Postgres start.
+            failureThreshold: 6
+          resources:
+            # Higher than service-2: this one holds a connection pool.
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 256Mi

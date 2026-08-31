@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Injected into every resource below, so none of them declare a namespace of
+# their own. One place to change if you ever rename the namespace.
+namespace: platform
+
+# The files to include. Kustomize reads only what is listed here, so a stray
+# YAML file in this directory is ignored rather than silently applied.
+resources:
+  - deployment.yaml
+  - service.yaml
+
+# Stamped on every resource here and on the pod template, but deliberately NOT
+# on the Deployment's selector. `commonLabels`, which this replaces, did write
+# to selectors and is now deprecated. Selectors are immutable, so a label that
+# lands there can only be changed by recreating the Deployment.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: local-platform
+    includeTemplates: true
+
+# The image transformation. `name` is what to match in the manifests (the bare
+# `image: service-2` in deployment.yaml); newName and newTag are what to
+# substitute.
+images:
+  - name: service-2
+    newName: ghcr.io/mhonnczedz1/service-2
+    # `dev` until CI takes over. From Section 8 this is a 40-character SHA,
+    # rewritten by one yq command. It is the only field CI ever touches, which
+    # is the whole reason this project uses Kustomize rather than Helm.
+    newTag: dev

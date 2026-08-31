@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: service-1
+  labels:
+    app: service-1
+spec:
+  # Which ingress controller should act on this rule. An Ingress is inert
+  # YAML on its own; Traefik is the program that reads it and routes traffic.
+  # Wrong or missing class here and nothing happens, with no error.
+  ingressClassName: traefik
+  rules:
+    # No host is set on purpose. That makes the rule match any Host
+    # header, so plain http://localhost:8080/ works with no /etc/hosts
+    # entry and no local DNS setup.
+    - http:
+        paths:
+          - path: /
+            # Prefix, so / matches every path below it. `Exact` would match
+            # only the bare / and nothing else.
+            pathType: Prefix
+            backend:
+              service:
+                # Points at the Service, never at pods directly. The Service
+                # is what load-balances across the two replicas.
+                name: service-1
+                port:
+                  # The Service's port, not the container's. They are both
+                  # 8000 here, which hides the distinction until they differ.
+                  number: 8000

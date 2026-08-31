@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-2
+  labels:
+    app: service-2
+spec:
+  # Deployment, not StatefulSet: these pods are interchangeable and own no
+  # storage. Any one can be killed and replaced with no consequence.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: service-2
+  template:
+    metadata:
+      labels:
+        # This label is what the Service's selector matches on. Change it here
+        # without changing service.yaml and the Service silently has zero
+        # endpoints: no error, just nothing answering.
+        app: service-2
+    spec:
+      containers:
+        - name: service-2
+          # Rewritten by the kustomization's images: block.
+          # Left as a bare name on purpose, so the transformation has an
+          # obvious key to match. If `kustomize build` shows this unchanged,
+          # the images: block did not match.
+          image: service-2
+          # Required for images side-loaded with 'k3d image import',
+          # which are present on the node but not in any registry.
+          # Once CI publishes to GHCR in Section 7 this stops mattering,
+          # because SHA tags are immutable and never need re-pulling.
+          imagePullPolicy: IfNotPresent
+          ports:
+            # Naming the port lets the probes below say `port: http` instead
+            # of repeating 8000, so there is one place to change it.
+            - name: http
+              containerPort: 8000
+          livenessProbe:
+            # Failing this RESTARTS the container.
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            # Failing this only removes the pod from the Service endpoints.
+            # Same endpoint here because service-2 has no dependencies; for
+            # service-1 the two probes deliberately differ.
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            # Tiny, because it is a stub. requests are what the scheduler
+            # reserves, so setting them honestly is what lets the whole stack
+            # fit in the 1.5-2.5 GB budget.
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 192Mi
