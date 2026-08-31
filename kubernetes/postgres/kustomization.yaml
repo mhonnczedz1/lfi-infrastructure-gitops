@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: platform
+
+resources:
+  - service.yaml
+  - statefulset.yaml
+
+# Stamped on both resources and on the pod template, but deliberately NOT on
+# selectors. The older `commonLabels` field did write to selectors and is now
+# deprecated; a StatefulSet's selector is immutable once created, so anything
+# that lands there can only be changed by deleting the StatefulSet.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: local-platform
+    includeTemplates: true

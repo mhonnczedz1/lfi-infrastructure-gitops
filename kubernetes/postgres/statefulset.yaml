@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  # Names the governing headless Service. A StatefulSet requires this, and the
+  # Service must already exist or pods get no stable DNS. It is what gives
+  # each pod a name like postgres-0.postgres.platform.svc.cluster.local.
+  serviceName: postgres
+  # One replica. Postgres does not replicate by simply raising this number:
+  # you would get two independent databases, not a cluster. Real HA needs an
+  # operator (CloudNativePG, Zalando) that handles primary election.
+  replicas: 1
+  selector:
+    # Must match the pod template labels below, or the API server rejects it.
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        # The postgres image runs as uid/gid 999. fsGroup makes the
+        # mounted volume group-writable by that user.
+        #
+        # Omit this and the container starts, fails to write to its data
+        # directory, and crash-loops with a permissions error.
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB, created
+            # by Terraform from .env. No values appear in this file.
+            #
+            # envFrom imports every key in the Secret as an env var of the same
+            # name, which is why the Terraform key names had to match exactly.
+            - secretRef:
+                name: postgres-credentials
+          env:
+            # Point PGDATA at a subdirectory. Postgres refuses to
+            # initialise into a mount root that already contains
+            # anything, and some volumes arrive with lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            # `name: data` ties back to the volumeClaimTemplate at the bottom.
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            # exec, not httpGet: Postgres speaks its own wire protocol, not
+            # HTTP. pg_isready is the shipped tool for exactly this.
+            # `exec` in front of pg_isready replaces the shell process rather
+            # than forking, so no stray sh lingers per probe.
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            # Fails fast (5s in) so traffic is not sent to a database that is
+            # still starting. Failing readiness only removes it from endpoints.
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            # Same check, different consequence: failing THIS one restarts the
+            # container. Hence the far more patient initialDelaySeconds, so a
+            # slow first-time initdb is never mistaken for a hang.
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            # requests = what the scheduler reserves. limits = the hard cap.
+            # No CPU limit on purpose: CPU is throttled when exceeded, which
+            # just makes startup slow, whereas exceeding a memory limit is an
+            # instant OOM kill.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+  # The clause that makes this a StatefulSet rather than a Deployment with a
+  # volume. Kubernetes creates one PVC per replica, named
+  # <template>-<statefulset>-<ordinal>, so `data-postgres-0`, and rebinds it to
+  # the same pod identity after a restart.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce: mountable by one node at a time. Correct for a
+        # single-writer database, and all local-path supports anyway.
+        accessModes: ["ReadWriteOnce"]
+        # k3d's built-in provisioner. It writes to a directory on the node,
+        # which is a container on your Mac, so this survives pod deletion but
+        # NOT cluster deletion.
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 2Gi
