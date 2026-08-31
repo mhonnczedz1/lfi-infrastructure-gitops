@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: service-2
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
+    targetRevision: HEAD
+    # The directory CI rewrites in Section 8. A commit to the newTag field
+    # inside it is what triggers everything below.
+    path: kubernetes/service-2
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    automated:
+      # TRUE here, unlike postgres. Deleting a stateless Deployment from Git
+      # should remove it from the cluster; there is nothing to lose.
+      prune: true
+      selfHeal: true
+    # Retries a failed sync instead of leaving the app in Degraded. Useful
+    # when a promote commit lands microseconds before GHCR finishes serving
+    # the new tag.
+    retry:
+      limit: 3
+      backoff:
+        # 10s, then 20s, then 40s, capped at 2m.
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

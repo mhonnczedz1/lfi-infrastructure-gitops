@@ -1,0 +1,45 @@
+# The app-of-apps root. Terraform applies this one manifest; everything
+# else the platform runs is discovered from Git by ArgoCD itself.
+#
+# The .tftpl extension marks it as a Terraform template: ${gitops_repo_url}
+# below is substituted by templatefile() at apply time, which is how a value
+# from your .env reaches a manifest without ever being committed.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  # Applications live in the argocd namespace even when the workloads they
+  # manage live elsewhere.
+  namespace: argocd
+  finalizers:
+    # Deleting this Application cascades to its children rather than
+    # orphaning them in the cluster.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # `default` is the AppProject ArgoCD ships with, which permits any repo and
+  # any destination. A real multi-tenant setup would define a narrower one.
+  project: default
+  source:
+    repoURL: ${gitops_repo_url}
+    # HEAD tracks the default branch. Pin to a tag or SHA if you ever want
+    # deliberate, reviewed promotion instead of continuous tracking.
+    targetRevision: HEAD
+    # Contains only child Application manifests, never workloads.
+    path: argocd/apps
+  destination:
+    # The in-cluster API server, addressed from inside the cluster. ArgoCD can
+    # target remote clusters too; this says "the one I am running in".
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # prune: delete resources removed from Git. Without it, deleting a file
+      # leaves the object running forever and Git stops being the truth.
+      prune: true
+      # selfHeal: revert manual changes made with kubectl. This is the single
+      # setting that makes Phase 6.3's drift demo work.
+      selfHeal: true
+    syncOptions:
+      # false because the argocd namespace already exists, created by Helm.
+      # The child Applications set this to true for the platform namespace.
+      - CreateNamespace=false

@@ -1,0 +1,40 @@
+# A child Application, discovered by `root` because it sits in argocd/apps/.
+# Committing this file IS the deployment: nothing applies it by hand.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
+    targetRevision: HEAD
+    # ArgoCD detects the kustomization.yaml here and runs kustomize build
+    # itself. No tool declaration is needed.
+    path: kubernetes/postgres
+  destination:
+    server: https://kubernetes.default.svc
+    # The workload namespace, not argocd. The Application object lives in
+    # argocd; what it deploys lands in platform.
+    namespace: platform
+  syncPolicy:
+    automated:
+      # prune is deliberately FALSE for the data layer. An accidental
+      # deletion in Git must not take the database with it. The
+      # stateless services below do enable it.
+      prune: false
+      selfHeal: true
+  ignoreDifferences:
+    # StatefulSet volumeClaimTemplates are immutable after creation and
+    # the API server returns them with defaulted fields, which ArgoCD
+    # would otherwise report as permanent drift.
+    #
+    # Without this the app sits at OutOfSync forever and you learn to ignore
+    # the status, which defeats the point of having one.
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates
