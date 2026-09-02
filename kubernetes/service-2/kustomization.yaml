@@ -25,4 +25,4 @@ images:
     # `dev` until CI takes over. From Section 8 this is a 40-character SHA,
     # rewritten by one yq command. It is the only field CI ever touches, which
     # is the whole reason this project uses Kustomize rather than Helm.
-    newTag: fb7c6fb1075ad23ed0bc60a83fcc926f53809834
+    newTag: 44365106b8ebc12b6775f18e40d7a8ed3c50ebcb
