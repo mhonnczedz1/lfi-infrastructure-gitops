@@ -17,4 +17,4 @@ images:
   - name: service-1
     newName: ghcr.io/mhonnczedz1/service-1
     # Rewritten by service-1's promote job in Section 8.
-    newTag: 863c56aaa7e25f3a2e42d0b528226573a399e1f4
+    newTag: 16587b321c891dd22b33e9127555910e2a6c0de7
