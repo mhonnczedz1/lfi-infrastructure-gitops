@@ -1,24 +1,20 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 namespace: platform
-
 resources:
   # Three files here, against two for service-2: this is the only service
   # exposed through the ingress.
   - deployment.yaml
   - service.yaml
   - ingress.yaml
-
 # Same form as service-2's, and for the same reason: labels on the objects and
 # the pod template, never on the selector.
 labels:
   - pairs:
       app.kubernetes.io/part-of: local-platform
     includeTemplates: true
-
 images:
   - name: service-1
     newName: ghcr.io/mhonnczedz1/service-1
     # Rewritten by service-1's promote job in Section 8.
-    newTag: dev
+    newTag: 863c56aaa7e25f3a2e42d0b528226573a399e1f4
