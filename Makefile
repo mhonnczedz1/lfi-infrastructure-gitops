@@ -33,6 +33,32 @@ CONTEXT  := k3d-$(CLUSTER)
 # the -f test in check-env would fail on a file that exists.
 ENV_FILE := $(CURDIR)/.env
 
+# ---------------------------------------------------------------------------
+# tf_env: the .env -> Terraform bridge, defined once and used by every target
+# that touches stage 2.
+#
+# `define` makes a multi-line variable. Referencing it in a recipe pastes those
+# lines in as recipe lines, which under .ONESHELL means they join the same
+# shell script as the rest of the target.
+#
+# This lives here rather than inline because platform-up and down BOTH need it.
+# terraform destroy evaluates the root module exactly like terraform apply
+# does, so a missing TF_VAR_ breaks a teardown just as hard as a bring-up.
+# Inlining it in one target and not the other is precisely the drift that made
+# `down` fail with "No value for required variable".
+#
+# Terraform reads variables from TF_VAR_<name>, never from .env directly.
+# Renaming either side breaks the link to variables.tf, so keep them in step.
+# $$ is how you write a literal $ in a Makefile: make eats one.
+# ---------------------------------------------------------------------------
+define tf_env
+set -a; source "$(ENV_FILE)"; set +a
+export TF_VAR_postgres_user="$$POSTGRES_USER"
+export TF_VAR_postgres_password="$$POSTGRES_PASSWORD"
+export TF_VAR_postgres_db="$$POSTGRES_DB"
+export TF_VAR_gitops_repo_url="$$GITOPS_REPO_URL"
+endef
+
 # Declare targets that are names of actions, not files to be built. Without
 # this, a file called `up` appearing in this directory would make `gmake up`
 # say "nothing to be done".
@@ -102,13 +128,7 @@ cluster-up: check-env ## Stage 1: create the k3d cluster
 # This is where the .env -> Terraform bridge actually happens.
 # ---------------------------------------------------------------------------
 platform-up: check-env ## Stage 2: secret, ArgoCD, root application
-	set -a; source "$(ENV_FILE)"; set +a
-# Terraform reads variables from TF_VAR_<name>, never from .env directly.
-# Renaming either side breaks the link to variables.tf, so keep them in step.
-	export TF_VAR_postgres_user="$$POSTGRES_USER"
-	export TF_VAR_postgres_password="$$POSTGRES_PASSWORD"
-	export TF_VAR_postgres_db="$$POSTGRES_DB"
-	export TF_VAR_gitops_repo_url="$$GITOPS_REPO_URL"
+	$(tf_env)
 	cd terraform/02-platform
 	terraform init -input=false
 	terraform apply -auto-approve -input=false
@@ -147,8 +167,13 @@ resume: ## Start a paused cluster and wait for its nodes
 #
 # This removes the postgres-credentials Secret. The PVC and its data are
 # untouched, because ArgoCD created those, not Terraform.
+#
+# check-env and $(tf_env) are here for the same reason they are on platform-up:
+# destroy has to evaluate the root module, so the no-default variables in
+# variables.tf are just as required going down as they were coming up.
 # ---------------------------------------------------------------------------
-down: ## Remove in-cluster platform resources, keep the cluster
+down: check-env ## Remove in-cluster platform resources, keep the cluster
+	$(tf_env)
 	cd terraform/02-platform
 	terraform destroy -auto-approve -input=false
 
@@ -157,9 +182,15 @@ down: ## Remove in-cluster platform resources, keep the cluster
 # the PVC and every row in the database.
 # ---------------------------------------------------------------------------
 destroy: ## Tear down everything including the cluster
-# The leading - tells make to carry on even if this fails. Deliberate: if the
+# `|| echo` keeps the teardown going when stage 2 fails. Deliberate: if the
 # cluster is already gone, stage 2's destroy cannot reach it, and that should
 # not block deleting the cluster itself.
-	-$(MAKE) down
+#
+# This CANNOT be a leading `-`. Under .ONESHELL the whole recipe is one shell
+# script, and the -e in .SHELLFLAGS aborts that script at the first failure.
+# A `-` only stops make from *reporting* the failure, which it does after the
+# shell has already skipped the two lines below, so `gmake destroy` exits 0
+# having destroyed nothing. `|| ...` is how you opt one command out of -e.
+	$(MAKE) down || echo "WARNING: stage 2 destroy failed. Continuing to delete the cluster." >&2
 	cd terraform/01-cluster
 	terraform destroy -auto-approve -input=false
