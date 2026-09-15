@@ -15,12 +15,6 @@ variable "kube_context" {
   default     = "k3d-platform"
 }
 
-variable "namespace" {
-  type        = string
-  description = "Namespace for application workloads."
-  default     = "platform"
-}
-
 # --- Supplied from .env by the Makefile. No defaults on purpose. ------------
 
 variable "postgres_user" {
@@ -33,12 +27,35 @@ variable "postgres_db" {
   description = "Supplied from .env via TF_VAR_postgres_db."
 }
 
-variable "postgres_password" {
+variable "environments" {
+  type        = list(string)
+  description = "Environment names. Each gets a namespace and its own Secret."
+  default     = ["dev", "prod"]
+}
+
+variable "namespace_prefix" {
   type        = string
-  description = "Supplied from .env via TF_VAR_postgres_password. Never defaulted."
-  # Redacts the value from plan and apply output. Note this does NOT encrypt
-  # it in terraform.tfstate, which is why the state file is gitignored.
+  description = "Namespaces are <prefix>-<environment>, so platform-dev and platform-prod."
+  default     = "platform"
+}
+
+variable "postgres_password_dev" {
+  type        = string
+  description = "Supplied from .env via TF_VAR_postgres_password_dev."
   sensitive   = true
+}
+
+variable "postgres_password_prod" {
+  type        = string
+  description = "Supplied from .env via TF_VAR_postgres_password_prod. Must differ from dev."
+  sensitive   = true
+}
+
+variable "argo_rollouts_chart_version" {
+  type        = string
+  description = "Pinned argo-rollouts chart version. Verified in Task 10.1.3."
+  # 2.43.1 deploys controller v1.10.0. Keep close to your kubectl plugin version.
+  default     = "2.43.1"
 }
 
 variable "gitops_repo_url" {

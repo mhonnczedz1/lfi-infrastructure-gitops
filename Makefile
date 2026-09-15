@@ -54,7 +54,8 @@ ENV_FILE := $(CURDIR)/.env
 define tf_env
 set -a; source "$(ENV_FILE)"; set +a
 export TF_VAR_postgres_user="$$POSTGRES_USER"
-export TF_VAR_postgres_password="$$POSTGRES_PASSWORD"
+export TF_VAR_postgres_password_dev="$$POSTGRES_PASSWORD_DEV"
+export TF_VAR_postgres_password_prod="$$POSTGRES_PASSWORD_PROD"
 export TF_VAR_postgres_db="$$POSTGRES_DB"
 export TF_VAR_gitops_repo_url="$$GITOPS_REPO_URL"
 endef
@@ -85,7 +86,7 @@ help:
 # ---------------------------------------------------------------------------
 check-env: ## Fail fast if .env is missing or incomplete
 # 1. The file has to exist at all.
-	if [[ ! -f "$(ENV_FILE)" ]]; then
+	@if [[ ! -f "$(ENV_FILE)" ]]; then
 	  echo "ERROR: $(ENV_FILE) not found. Copy .env.example to .env and fill it in." >&2
 	  exit 1
 	fi
@@ -96,7 +97,8 @@ check-env: ## Fail fast if .env is missing or incomplete
 # 3. Every required key must be non-empty. ${!var} is bash indirect expansion:
 #    it reads the variable *named by* $var. The :- suffix stops `set -u` from
 #    aborting before we can print a useful message.
-	for var in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB GITOPS_REPO_URL; do
+	for var in POSTGRES_USER POSTGRES_DB GITOPS_REPO_URL \
+	           POSTGRES_PASSWORD_DEV POSTGRES_PASSWORD_PROD; do
 	  if [[ -z "$${!var:-}" ]]; then
 	    echo "ERROR: $$var is unset or empty in .env" >&2
 	    exit 1
@@ -104,11 +106,18 @@ check-env: ## Fail fast if .env is missing or incomplete
 	done
 # 4. Reject the placeholder from .env.example. Copying the example and
 #    forgetting to edit it is the single most likely mistake here.
-	if [[ "$$POSTGRES_PASSWORD" == "change-me" ]]; then
-	  echo "ERROR: POSTGRES_PASSWORD is still the placeholder value." >&2
+	for var in POSTGRES_PASSWORD_DEV POSTGRES_PASSWORD_PROD; do
+	  if [[ "$${!var}" == "change-me" ]]; then
+	    echo "ERROR: $$var is still the placeholder value." >&2
+	    exit 1
+	  fi
+	done
+	if [[ "$$POSTGRES_PASSWORD_DEV" == "$$POSTGRES_PASSWORD_PROD" ]]; then
+	  echo "ERROR: dev and prod passwords are identical, which defeats the point." >&2
 	  exit 1
 	fi
-	echo "OK: .env looks complete."
+	echo "OK: .env looks complete." 
+
 
 # ---------------------------------------------------------------------------
 # cluster-up: stage 1 of the two-stage split. Creates the k3d cluster using

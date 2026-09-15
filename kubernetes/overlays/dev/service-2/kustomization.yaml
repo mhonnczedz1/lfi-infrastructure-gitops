@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Injected into every resource the base produces. One line, and this whole
+# overlay lands in a different namespace.
+namespace: platform-dev
+
+resources:
+  - ../../../base/service-2
+
+# The FULL image reference lives here, newName and newTag together. Splitting
+# newName into the base does not work: the overlay's transformer runs against
+# already-rewritten output, where the image is no longer the bare name it is
+# trying to match.
+#
+# This newTag field is the only thing service-2's CI ever writes.
+images:
+  - name: service-2
+    newName: ghcr.io/mhonnczedz1/service-2
+    newTag: 44365106b8ebc12b6775f18e40d7a8ed3c50ebcb
+
+patches:
+  # DO NOT use kustomize's `replicas:` field here. Its built-in transformer
+  # only knows Deployment, ReplicaSet, StatefulSet, and ReplicationController.
+  # A Rollout is a custom resource, so `replicas:` matches nothing, changes
+  # nothing, and reports nothing. You get prod's replica count in dev and no
+  # indication anything went wrong. A JSON6902 patch names the group and kind
+  # explicitly, so a mismatch is an error rather than a silence.
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: service-2
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1

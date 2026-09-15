@@ -26,6 +26,13 @@ spec:
     targetRevision: HEAD
     # Contains only child Application manifests, never workloads.
     path: argocd/apps
+    directory:
+      # argocd/apps now contains dev/ and prod/ subdirectories rather than
+      # Application manifests directly. Without recurse, ArgoCD reads only the
+      # top level, finds nothing, and reports Synced/Healthy having deployed
+      # nothing at all.
+      recurse: true
+
   destination:
     # The in-cluster API server, addressed from inside the cluster. ArgoCD can
     # target remote clusters too; this says "the one I am running in".

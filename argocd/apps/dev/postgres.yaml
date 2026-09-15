@@ -1,0 +1,44 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # Names must be unique within the argocd namespace, so the environment goes
+  # in the name. This is the one place the two environments cannot share an
+  # identifier.
+  name: postgres-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
+    targetRevision: HEAD
+    # The overlay, not the base. Pointing an Application at a base would
+    # deploy something belonging to no environment.
+    path: kubernetes/overlays/dev/postgres
+  destination:
+    server: https://kubernetes.default.svc
+    # Redundant with the overlay's `namespace:` field, which wins for any
+    # resource that has one. Kept because ArgoCD uses it for resources that
+    # arrive without a namespace, and because it documents intent at the
+    # Application level where you are most likely to read it.
+    namespace: platform-dev
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
+  ignoreDifferences:
+    # volumeClaimTemplates are immutable after creation and the API server
+    # returns them with defaulted fields, which ArgoCD reads as permanent
+    # drift. Without this the app sits OutOfSync forever and you learn to
+    # ignore the status, which defeats having one.
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates
