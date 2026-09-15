@@ -1,17 +1,31 @@
-apiVersion: apps/v1
-kind: Deployment
+# A Rollout is Argo Rollouts' replacement for a Deployment. Everything below
+# `template:` is unchanged from the Deployment it replaces.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
   name: service-2
   labels:
     app: service-2
 spec:
-  # Deployment, not StatefulSet: these pods are interchangeable and own no
-  # storage. Any one can be killed and replaced with no consequence.
+  # The prod default. The dev overlay patches this down to 1.
   replicas: 2
+  # If a new version has not become healthy within this window, the rollout
+  # aborts itself rather than sitting paused forever waiting for a human who
+  # is not coming.
+  progressDeadlineSeconds: 600
   selector:
     matchLabels:
       app: service-2
+  strategy:
+    canary:
+      # One step, straight to 100%, so this behaves exactly like a Deployment's
+      # rolling update. The prod overlay replaces these steps in Section 12.
+      # Keeping the shape here means that change is three lines rather than a
+      # restructure.
+      steps:
+        - setWeight: 100
   template:
+    # ... unchanged from deployment.yaml, every line ...
     metadata:
       labels:
         # This label is what the Service's selector matches on. Change it here

@@ -48,44 +48,58 @@ provider "helm" {
   }
 }
 
-# Created by Terraform rather than by ArgoCD, because the Secret below has to
-# land in it and Terraform runs first.
-resource "kubernetes_namespace" "platform" {
+locals {
+  # Per-environment passwords, assembled from two scalar variables rather than
+  # one map variable. A map would be tidier HCL, but passing JSON through
+  # TF_VAR_* from a Makefile requires quoting that is easy to get wrong and
+  # hard to debug. Two plain strings keep the bridge in Task 10.3.4 readable.
+  env_postgres_passwords = {
+    dev  = var.postgres_password_dev
+    prod = var.postgres_password_prod
+  }
+}
+
+resource "kubernetes_namespace" "env" {
+  for_each = toset(var.environments)
+
   metadata {
-    name = var.namespace
+    name = "${var.namespace_prefix}-${each.key}"
     labels = {
-      # Documents ownership for anyone reading `kubectl get ns -o yaml` and
-      # wondering why this namespace is not in the GitOps repo.
       "app.kubernetes.io/managed-by" = "terraform"
+      # Makes `kubectl get ns -l platform.local/environment=prod` work, which
+      # is more useful than it sounds once there are two of everything.
+      "platform.local/environment" = each.key
     }
   }
 }
 
-# The bridge described in decision 4: values arrive from the gitignored
-# .env as TF_VAR_* and land directly in the cluster. Git only ever holds
-# a secretKeyRef naming this Secret.
 resource "kubernetes_secret" "postgres" {
+  for_each = toset(var.environments)
+
   metadata {
     name      = "postgres-credentials"
-    # Referencing the resource, not var.namespace, creates an explicit
-    # dependency so Terraform orders the namespace first. metadata[0] is
-    # needed because metadata is a block, which HCL models as a list.
-    namespace = kubernetes_namespace.platform.metadata[0].name
+    namespace = kubernetes_namespace.env[each.key].metadata[0].name
   }
 
-  # Keys match what the postgres image and service-1 both expect,
-  # so both can consume this Secret with a single envFrom.
-  #
-  # Terraform base64-encodes these for you. Do not pre-encode them.
   data = {
     POSTGRES_USER     = var.postgres_user
-    POSTGRES_PASSWORD = var.postgres_password
+    POSTGRES_PASSWORD = local.env_postgres_passwords[each.key]
     POSTGRES_DB       = var.postgres_db
   }
 
-  # Opaque = arbitrary key/value. The other types (kubernetes.io/tls,
-  # dockerconfigjson) enforce specific keys, which is not what is wanted here.
   type = "Opaque"
+}
+
+resource "helm_release" "argo_rollouts" {
+  name             = "argo-rollouts"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-rollouts"
+  version          = var.argo_rollouts_chart_version
+  namespace        = "argo-rollouts"
+  create_namespace = true
+
+  wait    = true
+  timeout = 300
 }
 
 resource "helm_release" "argocd" {

@@ -36,6 +36,16 @@ options:
     # Do not return until the cluster is up, so Terraform's next step is safe.
     wait: true
     timeout: "180s"
+  # NEW. Caps each node container so the scheduler's view matches reality.
+  # 3g x 2 nodes leaves room for the k3d load balancer, containerd, and the
+  # VM's own kernel.
+  #
+  # k3d implements this with a synthetic /proc/meminfo and flags the feature
+  # experimental. If the cluster misbehaves after this change, delete these two
+  # lines and rebuild; nothing else depends on them.
+  runtime:
+    serversMemory: 3g
+    agentsMemory: 3g
   kubeconfig:
     # Merge into ~/.kube/config, or into $KUBECONFIG if you have set it.
     updateDefaultKubeconfig: true

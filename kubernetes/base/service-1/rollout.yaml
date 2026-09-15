@@ -1,17 +1,31 @@
-apiVersion: apps/v1
-kind: Deployment
+# A Rollout is Argo Rollouts' replacement for a Deployment. Everything below
+# `template:` is unchanged from the Deployment it replaces.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
   name: service-1
   labels:
     app: service-1
 spec:
-  # Two replicas is also what makes the zero-downtime check in Task 8.3.4
-  # meaningful: with one, a rolling update always has a gap.
+  # The prod default. The dev overlay patches this down to 1.
   replicas: 2
+  # If a new version has not become healthy within this window, the rollout
+  # aborts itself rather than sitting paused forever waiting for a human who
+  # is not coming.
+  progressDeadlineSeconds: 600
   selector:
     matchLabels:
       app: service-1
+  strategy:
+    canary:
+      # One step, straight to 100%, so this behaves exactly like a Deployment's
+      # rolling update. The prod overlay replaces these steps in Section 12.
+      # Keeping the shape here means that change is three lines rather than a
+      # restructure.
+      steps:
+        - setWeight: 100
   template:
+    # ... unchanged from deployment.yaml, every line ...
     metadata:
       labels:
         app: service-1
