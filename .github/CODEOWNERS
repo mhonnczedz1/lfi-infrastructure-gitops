@@ -1,0 +1,11 @@
+# Changes under this path require review from the listed owner. This is the
+# prod release gate, and it is why environment branches are unnecessary: a
+# directory can be protected just as effectively as a branch.
+/kubernetes/overlays/prod/    @mhonnczedz1
+
+# Terraform provisions both environments, so it gets the same treatment.
+/terraform/                   @mhonnczedz1
+
+# Deliberately unowned: dev is meant to be continuous, and requiring review
+# here would defeat the purpose of automated promotion.
+# /kubernetes/overlays/dev/
