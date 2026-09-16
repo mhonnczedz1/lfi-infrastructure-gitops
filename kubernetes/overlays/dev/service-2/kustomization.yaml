@@ -1,13 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 # Injected into every resource the base produces. One line, and this whole
 # overlay lands in a different namespace.
 namespace: platform-dev
-
 resources:
   - ../../../base/service-2
-
 # The FULL image reference lives here, newName and newTag together. Splitting
 # newName into the base does not work: the overlay's transformer runs against
 # already-rewritten output, where the image is no longer the bare name it is
@@ -17,8 +14,7 @@ resources:
 images:
   - name: service-2
     newName: ghcr.io/mhonnczedz1/service-2
-    newTag: 44365106b8ebc12b6775f18e40d7a8ed3c50ebcb
-
+    newTag: 26W38B1
 patches:
   # DO NOT use kustomize's `replicas:` field here. Its built-in transformer
   # only knows Deployment, ReplicaSet, StatefulSet, and ReplicationController.
