@@ -18,5 +18,9 @@
 denied:
   - build: 26W38B1
     service: service-1
-    reason: /healthz flapping under load, worker timeouts after ~2h
+    reason: sample deny
+    denied_by: mhonn
+  - build: 26W38B1
+    service: service-2
+    reason: sample deny
     denied_by: mhonn
