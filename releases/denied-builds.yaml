@@ -16,7 +16,7 @@
 #       reason: OOMs at real queue depth after ~6h
 #       denied_by: mhonn
 denied:
-  - build: 26W37B1
+  - build: 26W38B1
     service: service-1
     reason: /healthz flapping under load, worker timeouts after ~2h
     denied_by: mhonn
