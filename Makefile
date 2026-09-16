@@ -203,3 +203,21 @@ destroy: ## Tear down everything including the cluster
 	$(MAKE) down || echo "WARNING: stage 2 destroy failed. Continuing to delete the cluster." >&2
 	cd terraform/01-cluster
 	terraform destroy -auto-approve -input=false
+
+# ---------------------------------------------------------------------------
+# release: open the weekly prod promotion PR.
+#
+# Deliberately does NOT apply anything. It only opens a PR. Prod changes when
+# you merge, and ArgoCD picks it up from there. That separation is the gate.
+# ---------------------------------------------------------------------------
+release: ## Open the weekly prod release PR
+	./scripts/release.sh
+
+# ---------------------------------------------------------------------------
+# urls: print where each environment answers. Trivial, and saves you
+# remembering which hostname is which every time.
+# ---------------------------------------------------------------------------
+urls: ## Print the ingress URLs for both environments
+	@echo "dev    http://dev.localhost:8080"
+	@echo "prod   http://prod.localhost:8080"
+	@echo "argocd http://argocd.localhost:8080"

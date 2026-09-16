@@ -1,0 +1,22 @@
+# Builds that must never be promoted to prod.
+#
+# Adding an entry vetoes a build. Removing one unblocks it. Both are commits,
+# so the history here is the permanent record of why something never shipped.
+#
+# This file is deliberately outside kubernetes/: it is not a manifest and no
+# ArgoCD Application should ever see it.
+#
+# `service` is required. Build ordinals are per-service, so 26W38B3 for
+# service-1 and 26W38B3 for service-2 are unrelated images.
+#
+# Example:
+#   denied:
+#     - build: 26W38B3
+#       service: service-1
+#       reason: OOMs at real queue depth after ~6h
+#       denied_by: mhonn
+denied:
+  - build: 26W37B1
+    service: service-1
+    reason: /healthz flapping under load, worker timeouts after ~2h
+    denied_by: mhonn
