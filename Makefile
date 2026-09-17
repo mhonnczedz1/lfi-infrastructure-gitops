@@ -221,3 +221,26 @@ urls: ## Print the ingress URLs for both environments
 	@echo "dev    http://dev.localhost:8080"
 	@echo "prod   http://prod.localhost:8080"
 	@echo "argocd http://argocd.localhost:8080"
+
+# ---------------------------------------------------------------------------
+# canary-*: operate on an in-flight prod rollout.
+#
+# These change no desired state, which is why they are commands rather than
+# commits. They advance or unwind a convergence toward what Git already says.
+#
+# Usage: gmake canary-status SVC=service-1
+# ---------------------------------------------------------------------------
+ROLLOUT_NS := platform-prod
+
+canary-status: ## Watch an in-flight prod rollout. SVC=service-1
+	kubectl argo rollouts get rollout $(SVC) -n $(ROLLOUT_NS) --watch
+
+canary-promote: ## Complete a paused prod rollout. SVC=service-1
+	kubectl argo rollouts promote $(SVC) -n $(ROLLOUT_NS)
+
+canary-abort: ## Scale the canary to zero, leaving stable serving. SVC=service-1
+	kubectl argo rollouts abort $(SVC) -n $(ROLLOUT_NS)
+	@echo
+	@echo "Canary removed from service. Stable is unaffected."
+	@echo "This does NOT undo the release: Git still points prod at the bad tag,"
+	@echo "so the next sync will try again. Revert the release PR to make it stick."

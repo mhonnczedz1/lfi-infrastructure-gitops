@@ -16,12 +16,16 @@ images:
     newName: ghcr.io/mhonnczedz1/service-1
     newTag: 26W38B1
 patches:
-  # DO NOT use kustomize's `replicas:` field here. Its built-in transformer
-  # only knows Deployment, ReplicaSet, StatefulSet, and ReplicationController.
-  # A Rollout is a custom resource, so `replicas:` matches nothing, changes
-  # nothing, and reports nothing. You get prod's replica count in dev and no
-  # indication anything went wrong. A JSON6902 patch names the group and kind
-  # explicitly, so a mismatch is an error rather than a silence.
+  # Replaces the base's single-step strategy with a real canary. Dev keeps the
+  # single setWeight: 100 step and continues rolling straight through.
+  #
+  # setWeight is a proportion of pods, not a traffic rule. With replicas: 2,
+  # 50 means one canary pod beside one stable pod, and the existing ClusterIP
+  # splits requests across them by endpoint count. This is why no Traefik
+  # configuration or traffic router appears anywhere in this guide.
+  #
+  # `pause: {}` with no duration waits INDEFINITELY. That is the manual gate:
+  # no timer is racing your judgment.
   - target:
       group: argoproj.io
       version: v1alpha1
@@ -29,8 +33,11 @@ patches:
       name: service-1
     patch: |-
       - op: replace
-        path: /spec/replicas
-        value: 2
+        path: /spec/strategy/canary/steps
+        value:
+          - setWeight: 50
+          - pause: {}
+          - setWeight: 100
   # The base Ingress deliberately has no host, so it matches any Host header.
   # Two of those would collide in one cluster, so each environment adds its own.
   #
