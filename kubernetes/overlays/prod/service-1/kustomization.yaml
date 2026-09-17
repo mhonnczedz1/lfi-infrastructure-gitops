@@ -14,7 +14,7 @@ resources:
 images:
   - name: service-1
     newName: ghcr.io/mhonnczedz1/service-1
-    newTag: 26W38B1
+    newTag: 26W38B2
 patches:
   # Replaces the base's single-step strategy with a real canary. Dev keeps the
   # single setWeight: 100 step and continues rolling straight through.
