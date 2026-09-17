@@ -1,13 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 # Injected into every resource the base produces. One line, and this whole
 # overlay lands in a different namespace.
 namespace: platform-prod
-
 resources:
   - ../../../base/service-1
-
 # The FULL image reference lives here, newName and newTag together. Splitting
 # newName into the base does not work: the overlay's transformer runs against
 # already-rewritten output, where the image is no longer the bare name it is
@@ -17,8 +14,7 @@ resources:
 images:
   - name: service-1
     newName: ghcr.io/mhonnczedz1/service-1
-    newTag: 863c56aaa7e25f3a2e42d0b528226573a399e1f4
-
+    newTag: 26W38B1
 patches:
   # DO NOT use kustomize's `replicas:` field here. Its built-in transformer
   # only knows Deployment, ReplicaSet, StatefulSet, and ReplicationController.
@@ -35,7 +31,6 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 2
-
   # The base Ingress deliberately has no host, so it matches any Host header.
   # Two of those would collide in one cluster, so each environment adds its own.
   #
