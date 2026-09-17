@@ -30,7 +30,7 @@ patches:
       group: argoproj.io
       version: v1alpha1
       kind: Rollout
-      name: service-1
+      name: service-2
     patch: |-
       - op: replace
         path: /spec/strategy/canary/steps
