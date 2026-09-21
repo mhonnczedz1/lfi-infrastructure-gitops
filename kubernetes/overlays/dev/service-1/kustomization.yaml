@@ -14,7 +14,7 @@ resources:
 images:
   - name: service-1
     newName: ghcr.io/mhonnczedz1/service-1
-    newTag: 26W39B1
+    newTag: 26W39B2
 patches:
   # DO NOT use kustomize's `replicas:` field here. Its built-in transformer
   # only knows Deployment, ReplicaSet, StatefulSet, and ReplicationController.
