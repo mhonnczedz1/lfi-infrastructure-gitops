@@ -7,6 +7,7 @@
 set -euo pipefail
 
 SERVICES=(service-1 service-2)
+TREES=(local eks)
 # %G is the ISO week-numbering year, not the calendar year. They diverge at
 # New Year: 2027-01-01 falls in ISO week 53 of 2026, so %Y-W%V would name that
 # release 2027-W53, a week that does not exist. UTC to match CI.
@@ -35,35 +36,37 @@ fi
 # whether there is a release to make and can build the PR body.
 declare -a CHANGES=()
 declare -a BLOCKED=()
-for svc in "${SERVICES[@]}"; do
-  dev_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-    "kubernetes/overlays/local/dev/$svc/kustomization.yaml")"
-  prod_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-    "kubernetes/overlays/local/prod/$svc/kustomization.yaml")"
+for tree in "${TREES[@]}"; do
+  for svc in "${SERVICES[@]}"; do
+    dev_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
+      "kubernetes/overlays/$tree/dev/$svc/kustomization.yaml")"
+    prod_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
+      "kubernetes/overlays/$tree/prod/$svc/kustomization.yaml")"
 
-  [[ "$dev_tag" == "$prod_tag" ]] && continue
+    [[ "$dev_tag" == "$prod_tag" ]] && continue
 
-  # A denied build drops out of the release. It is never silently replaced
-  # with an older one: shipping something other than what you asked for is
-  # exactly the surprise this whole process exists to prevent. strenv reads
-  # the values as strings so a numeric-looking tag is not coerced.
-  reason="$(SVC="$svc" TAG="$dev_tag" yq '
-    .denied[] | select(.service == strenv(SVC) and .build == strenv(TAG)) | .reason
-  ' "$DENYLIST")"
+    # A denied build drops out of the release. It is never silently replaced
+    # with an older one: shipping something other than what you asked for is
+    # exactly the surprise this whole process exists to prevent. strenv reads
+    # the values as strings so a numeric-looking tag is not coerced.
+    reason="$(SVC="$svc" TAG="$dev_tag" yq '
+      .denied[] | select(.service == strenv(SVC) and .build == strenv(TAG)) | .reason
+    ' "$DENYLIST")"
 
-  if [[ -n "$reason" ]]; then
-    BLOCKED+=("$svc|$dev_tag|$reason")
-    continue
-  fi
+    if [[ -n "$reason" ]]; then
+      BLOCKED+=("$tree|$svc|$dev_tag|$reason")
+      continue
+    fi
 
-  CHANGES+=("$svc|$prod_tag|$dev_tag")
+    CHANGES+=("$tree|$svc|$prod_tag|$dev_tag")
+  done
 done
 
 if [[ ${#BLOCKED[@]} -gt 0 ]]; then
   echo "Denied builds, excluded from this release:" >&2
   for blocked in "${BLOCKED[@]}"; do
-    IFS='|' read -r svc tag reason <<< "$blocked"
-    printf '  %-12s %-10s %s\n' "$svc" "$tag" "$reason" >&2
+    IFS='|' read -r tree svc tag reason <<< "$blocked"
+    printf '  %-18s %-10s %s\n' "$tree/$svc" "$tag" "$reason" >&2
   done
 fi
 
@@ -114,12 +117,12 @@ RELEASE_ID="${BRANCH#release/}"
 git switch -c "$BRANCH"
 
 # Write the new tags. This is the entire mechanical content of a release.
-BODY="## Release ${RELEASE_ID}"$'\n\n'"| Service | From | To |"$'\n'"|---|---|---|"$'\n'
+BODY="## Release ${RELEASE_ID}"$'\n\n'"| Tree / service | From | To |"$'\n'"|---|---|---|"$'\n'
 for change in "${CHANGES[@]}"; do
-  IFS='|' read -r svc from to <<< "$change"
+  IFS='|' read -r tree svc from to <<< "$change"
   yq -i '(.images[] | select(.name == "'"$svc"'") | .newTag) = "'"$to"'"' \
-    "kubernetes/overlays/local/prod/$svc/kustomization.yaml"
-  BODY+="| \`$svc\` | \`${from:0:12}\` | \`${to:0:12}\` |"$'\n'
+    "kubernetes/overlays/$tree/prod/$svc/kustomization.yaml"
+  BODY+="| \`$tree/$svc\` | \`${from:0:12}\` | \`${to:0:12}\` |"$'\n'
 done
 
 BODY+=$'\n'"Promote **service-2 before service-1**: service-1 calls service-2, so"
@@ -127,14 +130,14 @@ BODY+=" promoting the dependency first keeps each canary judgment about one chan
 
 # Reviewers need to see what is NOT in the release as much as what is.
 if [[ ${#BLOCKED[@]} -gt 0 ]]; then
-  BODY+=$'\n\n'"### Excluded by the deny list"$'\n\n'"| Service | Build | Reason |"$'\n'"|---|---|---|"$'\n'
+  BODY+=$'\n\n'"### Excluded by the deny list"$'\n\n'"| Tree / service | Build | Reason |"$'\n'"|---|---|---|"$'\n'
   for blocked in "${BLOCKED[@]}"; do
-    IFS='|' read -r svc tag reason <<< "$blocked"
-    BODY+="| \`$svc\` | \`$tag\` | $reason |"$'\n'
+    IFS='|' read -r tree svc tag reason <<< "$blocked"
+    BODY+="| \`$tree/$svc\` | \`$tag\` | $reason |"$'\n'
   done
 fi
 
-git add kubernetes/overlays/local/prod
+git add kubernetes/overlays/local/prod kubernetes/overlays/eks/prod
 git commit -m "release(prod): ${RELEASE_ID}"
 git push -u origin "$BRANCH"
 
