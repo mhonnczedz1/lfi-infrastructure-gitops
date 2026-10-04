@@ -2,6 +2,7 @@
 # prod release gate, and it is why environment branches are unnecessary: a
 # directory can be protected just as effectively as a branch.
 /kubernetes/overlays/local/prod/    @mhonnczedz1
+/kubernetes/overlays/eks/prod/      @mhonnczedz1
 
 # Terraform provisions both environments, so it gets the same treatment.
 /terraform/                   @mhonnczedz1
