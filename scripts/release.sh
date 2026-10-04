@@ -11,7 +11,6 @@ SERVICES=(service-1 service-2)
 # New Year: 2027-01-01 falls in ISO week 53 of 2026, so %Y-W%V would name that
 # release 2027-W53, a week that does not exist. UTC to match CI.
 WEEK="$(date -u +%G-W%V)"     # ISO week, so release/2026-W36
-BRANCH="release/${WEEK}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
@@ -80,10 +79,42 @@ if [[ ${#CHANGES[@]} -eq 0 ]]; then
   exit 0
 fi
 
+# Name the branch after the newest build in this release, so each release says
+# what it contains: release/2026-W40-B3. Tags look like 26W40B3, so the build
+# ordinal is whatever follows the B. The last |-field of a change is the dev
+# tag whatever else the record carries. A tag that does not parse (a SHA, say)
+# is ignored, and a release with no parsable tag falls back to release/2026-W40.
+BUILD_N=0
+for change in "${CHANGES[@]}"; do
+  tag="${change##*|}"
+  if [[ "$tag" =~ ^[0-9]{2}W[0-9]{2}B([0-9]+)$ ]]; then
+    ordinal=$((10#${BASH_REMATCH[1]}))
+    (( ordinal > BUILD_N )) && BUILD_N=$ordinal
+  fi
+done
+BASE_BRANCH="release/${WEEK}"
+(( BUILD_N > 0 )) && BASE_BRANCH+="-B${BUILD_N}"
+
+# The branch from an earlier release still exists locally and on the remote.
+# That is only a collision here if a re-release has the same newest build, which
+# is unusual but possible, so fall back to a -2, -3 suffix. The remote check
+# matters: a free local name that exists on origin would build the release
+# commit and then fail at the push.
+git fetch --quiet --prune origin
+BRANCH="$BASE_BRANCH"
+n=2
+while git show-ref --verify --quiet "refs/heads/${BRANCH}" \
+   || git show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; do
+  BRANCH="${BASE_BRANCH}-${n}"
+  n=$((n + 1))
+done
+# What the commit and PR are called, for example 2026-W40-B3.
+RELEASE_ID="${BRANCH#release/}"
+
 git switch -c "$BRANCH"
 
 # Write the new tags. This is the entire mechanical content of a release.
-BODY="## Release ${WEEK}"$'\n\n'"| Service | From | To |"$'\n'"|---|---|---|"$'\n'
+BODY="## Release ${RELEASE_ID}"$'\n\n'"| Service | From | To |"$'\n'"|---|---|---|"$'\n'
 for change in "${CHANGES[@]}"; do
   IFS='|' read -r svc from to <<< "$change"
   yq -i '(.images[] | select(.name == "'"$svc"'") | .newTag) = "'"$to"'"' \
@@ -104,10 +135,10 @@ if [[ ${#BLOCKED[@]} -gt 0 ]]; then
 fi
 
 git add kubernetes/overlays/local/prod
-git commit -m "release(prod): ${WEEK}"
+git commit -m "release(prod): ${RELEASE_ID}"
 git push -u origin "$BRANCH"
 
-gh pr create --title "release(prod): ${WEEK}" --body "$BODY" --base main
+gh pr create --title "release(prod): ${RELEASE_ID}" --body "$BODY" --base main
 
 git switch main
 echo "PR opened. Review the diff: it is your release note."
