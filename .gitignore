@@ -12,6 +12,7 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+.tmp/
 
 # Generated manifests written by Terraform at apply time
 terraform/**/.generated/
