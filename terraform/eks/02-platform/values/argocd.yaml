@@ -1,0 +1,82 @@
+# Trimmed for a single-user local cluster. Each disabled component
+# below is a real feature you are choosing not to run, not dead weight.
+
+# SSO / OIDC broker. Local admin login only, so it is not needed.
+dex:
+  enabled: false
+
+# Slack / email alerting on sync events.
+notifications:
+  enabled: false
+
+# Templated generation of Applications across many clusters.
+# The app-of-apps pattern in Phase 6.2 covers this project's needs.
+#
+# WARNING: this key does nothing. The argo-cd chart has no
+# `applicationSet.enabled` value, in 7.x or in 10.x, and its deployment
+# template carries no conditional. Helm ignores unrecognised values silently,
+# so the ApplicationSet controller IS deployed regardless of what you write
+# here. It is kept only to document the intent.
+#
+# To actually remove it, set the replica count to zero instead:
+#   applicationSet:
+#     replicas: 0
+# Budget roughly 50-100 MB if you leave it running, which is what the resource
+# figures below assume.
+applicationSet:
+  enabled: false
+
+configs:
+  params:
+    # Terminate TLS at Traefik or at kubectl port-forward instead of
+    # inside argocd-server. Avoids the self-signed certificate dance
+    # for a cluster reachable only from localhost.
+    server.insecure: true
+    # Poll Git every 3 minutes. Lower it if you dislike waiting during
+    # Section 8; a webhook would be the production answer.
+    #
+    # This interval is also what bounds the drift-correction demo in Phase
+    # 6.3: a manual `kubectl scale` survives at most this long.
+    timeout.reconciliation: 180s
+
+# --- Resource budgets for ArgoCD's four components. -------------------------
+# Without these the chart requests far more than a laptop wants to give.
+# Memory limits only, no CPU limits: throttling is recoverable, an OOM kill
+# mid-sync is not.
+
+# The reconciliation engine. Does the actual diffing and applying, so it is
+# the component that most needs headroom.
+controller:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+
+# Clones Git and renders manifests (runs kustomize build for you).
+repoServer:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+# The API and web UI. Idle most of the time.
+server:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+
+# Manifest cache. Losing it costs a re-render, not data.
+redis:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
