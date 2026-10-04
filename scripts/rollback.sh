@@ -2,10 +2,12 @@
 # Opens a PR that rolls one prod service back to an earlier image tag.
 #
 # Usage: scripts/rollback.sh [<service> [<to>]]
-#   With no arguments it asks, in a terminal: which service, then what to go back
-#   to (a numbered list of recent builds, or type one), then asks to confirm.
-#   Anything you pass skips that question. Without a terminal, a missing
-#   argument is an error with a hint, never a prompt.
+#   With no arguments it asks, in a terminal: which cluster (local or eks), which
+#   service, what to go back to (a numbered list of recent builds, or type one),
+#   then asks to confirm. Anything you pass skips that question:
+#     gmake rollback CLUSTER=eks SVC=service-1 TO=26W39B2
+#   Without a terminal, a missing argument is an error with a hint, never a prompt.
+#   One cluster per rollback: whether to go back is a per-cluster judgment.
 #   <service>  service-1 or service-2
 #   <to>       what to go back to, in any of three forms:
 #                a build name     26W39B2
@@ -20,13 +22,17 @@
 # end: until dev moves on, the next `gmake release` promotes the same build again.
 set -euo pipefail
 
-SERVICES=(service-1 service-2)
-# Prod overlay trees to roll back. Add `eks` here once the EKS cluster exists
-# and kubernetes/overlays/eks/prod is in use.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+SERVICES=("${LFI_SERVICES[@]}")
+# The prod overlay tree to roll back, named after the cluster. Replaced below by
+# the cluster you choose. local until then, so the hints in usage() have something
+# to show if an argument is wrong before the question is reached.
 TREES=(local)
 
-SVC="${1:-}"
-TO="${2:-}"
+SVC="${1:-${SVC:-}}"
+TO="${2:-${TO:-}}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -72,7 +78,7 @@ usage() {
   {
     echo "ERROR: $1"
     echo
-    echo "  Usage:  gmake rollback SVC=service-1 TO=<build | release | commit>"
+    echo "  Usage:  gmake rollback CLUSTER=local SVC=service-1 TO=<build | release | commit>"
     echo
     echo "  TO can be:"
     echo "    a build name     26W39B2"
@@ -108,27 +114,12 @@ git fetch --quiet --prune origin
 INTERACTIVE=0
 [[ -t 0 ]] && INTERACTIVE=1
 
-if [[ -z "$SVC" ]]; then
-  if [[ "$INTERACTIVE" -ne 1 ]]; then usage "SVC is required: the service to roll back."; fi
-  echo
-  echo "Which service do you want to roll back in prod?"
-  i=1
-  for s in "${SERVICES[@]}"; do
-    now="$(prod_tag_at HEAD "${TREES[0]}" "$s")"
-    printf '  %d) %-10s prod is on %s\n' "$i" "$s" "${now:-?}"
-    i=$((i + 1))
-  done
-  read -r -p "Choose a number or type the name (Enter to cancel): " choice
-  [[ -n "$choice" ]] || { echo "Cancelled. Nothing changed."; exit 1; }
-  if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -le ${#SERVICES[@]} ]]; then
-    SVC="${SERVICES[$((choice - 1))]}"
-  else
-    SVC="$choice"
-  fi
-fi
-if [[ " ${SERVICES[*]} " != *" $SVC "* ]]; then
-  usage "SVC must be one of: ${SERVICES[*]} (got '$SVC')."
-fi
+# Cluster first, since the prod tags, the history and the PR all belong to one.
+pick_cluster "roll back" no "running"
+TREES=("${PICKED_CLUSTERS[0]}")
+CLUSTER_NAME="${TREES[0]}"
+pick_service "roll back" no
+SVC="${PICKED_SERVICES[0]}"
 
 if [[ -z "$TO" ]]; then
   if [[ "$INTERACTIVE" -ne 1 ]]; then usage "TO is required: the build, release or commit to go back to."; fi
@@ -146,7 +137,7 @@ if [[ -z "$TO" ]]; then
     i=$((i + 1))
   done
   echo
-  echo "  Or type a build name, a release name (recent: $(recent_releases 3 | paste -sd ', ' -)),"
+  echo "  Or type a build name, a release name (recent: $(recent_releases 3 | paste -sd ',' - | sed 's/,/, /g')),"
   echo "  or a commit hash."
   read -r -p "Roll back to (Enter to cancel): " choice
   [[ -n "$choice" ]] || { echo "Cancelled. Nothing changed."; exit 1; }
@@ -155,6 +146,7 @@ if [[ -z "$TO" ]]; then
   else
     TO="$choice"
   fi
+  EQUIV+=" TO=${TO}"
 fi
 
 # --- Work out which commit (if any) TO names, and what kind of input it is. ---
@@ -241,7 +233,7 @@ fi
 
 # --- Show what will happen, and ask. ---
 echo
-echo "Rollback $SVC in prod:"
+echo "Rollback ${SVC} in prod on ${CLUSTER_NAME}:"
 for entry in "${PLAN[@]}"; do
   IFS='|' read -r tree file from to <<< "$entry"
   echo "  $tree   $from  ->  $to"
@@ -252,15 +244,13 @@ for entry in "${PLAN[@]}"; do
   fi
 done
 echo "  asked for: $TO ($ASKED)"
+show_equivalent "gmake rollback"
 echo
-if [[ "${ASSUME_YES:-}" != "1" ]]; then
-  read -r -p "Open the rollback PR? [y/N] " answer
-  [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled. Nothing changed."; exit 1; }
-fi
+confirm "Open the rollback PR?"
 
 # --- Branch, edit, commit, push, PR. ---
 FIRST_TO="${PLAN[0]##*|}"
-BASE_BRANCH="rollback/${SVC}-${FIRST_TO}"
+BASE_BRANCH="rollback/${CLUSTER_NAME}-${SVC}-${FIRST_TO}"
 BRANCH="$BASE_BRANCH"
 n=2
 while git show-ref --verify --quiet "refs/heads/${BRANCH}" \
@@ -270,7 +260,7 @@ while git show-ref --verify --quiet "refs/heads/${BRANCH}" \
 done
 git switch -c "$BRANCH"
 
-BODY="## Rollback ${SVC}"$'\n\n'"| Tree | From | To |"$'\n'"|---|---|---|"$'\n'
+BODY="## Rollback ${CLUSTER_NAME}/${SVC}"$'\n\n'"| Tree | From | To |"$'\n'"|---|---|---|"$'\n'
 for entry in "${PLAN[@]}"; do
   IFS='|' read -r tree file from to <<< "$entry"
   yq -i '(.images[] | select(.name == "'"$SVC"'") | .newTag) = "'"$to"'"' "$file"
@@ -280,18 +270,21 @@ done
 BODY+=$'\n'"Asked for: \`${TO}\` (${ASKED})"$'\n\n'
 BODY+="**This does not deny the build it replaces.** Until dev moves past it, the next"$'\n'
 BODY+="\`gmake release\` promotes the same build again. After merging, the prod canary"$'\n'
-BODY+="pauses at 50 percent like any release: \`gmake canary-promote SVC=${SVC}\`."
+BODY+="pauses at 50 percent like any release: \`gmake canary\`."
 
 FROM_TAG="$(echo "${PLAN[0]}" | cut -d'|' -f3)"
-git commit -m "rollback(prod): ${SVC} ${FROM_TAG} -> ${FIRST_TO}"
+git commit -m "rollback(prod): ${CLUSTER_NAME}/${SVC} ${FROM_TAG} -> ${FIRST_TO}"
 git push -u origin "$BRANCH"
 
-gh pr create --title "rollback(prod): ${SVC} ${FROM_TAG} -> ${FIRST_TO}" --body "$BODY" --base main
+gh pr create --title "rollback(prod): ${CLUSTER_NAME}/${SVC} ${FROM_TAG} -> ${FIRST_TO}" --body "$BODY" --base main
 
 git switch main
 echo
 echo "Rollback PR opened. Review the diff, then merge it."
+echo
 echo "WARNING: ${FROM_TAG} is not on the deny list. Until dev moves past it, the next"
 echo "         gmake release will promote it again. Add it to releases/denied-builds.yaml"
 echo "         if it must never ship."
-echo "After merging, the canary pauses at 50 percent: gmake canary-promote SVC=${SVC}"
+next_steps "merge the PR           ArgoCD then starts a canary that pauses at 50 percent." \
+           "gmake canary           promote it to finish the rollback on ${CLUSTER_NAME}." \
+           "gmake status           confirm ${SVC} is back on ${FIRST_TO}"

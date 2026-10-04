@@ -1,29 +1,59 @@
 #!/usr/bin/env bash
 # Operates on an in-flight prod canary: watch it, promote it, or abort it.
 #
-# Usage: scripts/canary.sh <status|promote|abort> [<service>]
-#   With no service, in a terminal, it shows each service's rollout state and
-#   asks which one. promote and abort then ask you to confirm. Name the service
-#   (SVC=service-1 in the Makefile) and it does the action straight away, as the
-#   canary commands always did. Without a terminal, a missing service is an
-#   error with a hint, never a prompt.
+# Usage: scripts/canary.sh [<status|promote|abort>] [<service>]
+#   Asks what you want to do, on which cluster, and for which service, showing
+#   each rollout's state before you choose. promote and abort then confirm.
+#   Name things up front and nothing is asked:
+#     gmake canary ACTION=promote CLUSTER=eks SVC=service-2
+#   Without a terminal, a missing answer is an error with a hint, never a prompt.
 #
 # These change no desired state, which is why they are commands rather than
 # commits. They advance or unwind a convergence toward what Git already says.
 set -euo pipefail
 
-ACTION="${1:-}"
-SVC="${2:-}"
-SERVICES=(service-1 service-2)
-CONTEXT="${CONTEXT:-k3d-platform}"
-NAMESPACE="${NAMESPACE:-platform-prod}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+source "$SCRIPT_DIR/lib.sh"
 
+ACTION="${1:-${ACTION:-}}"
+SVC="${2:-${SVC:-}}"
+NAMESPACE="${NAMESPACE:-platform-prod}"
+PICKED_BY_MENU=0
+
+# --- 1. What do you want to do? ---------------------------------------------
+if [[ -z "$ACTION" ]]; then
+  is_tty || usage_error "ACTION is required (watch, promote or abort)." \
+    "gmake canary ACTION=promote CLUSTER=local SVC=service-2"
+  echo
+  echo "What do you want to do with a prod canary?"
+  echo "  1) watch     follow a rollout live. Changes nothing."
+  echo "  2) promote   finish a paused rollout: the new build takes all the traffic."
+  echo "  3) abort     stop the canary. Stable keeps serving, and Git still points at the new build."
+  ask "Choose a number or name"
+  case "$REPLY_VALUE" in
+    1|watch|status) ACTION=status ;;
+    2|promote)      ACTION=promote ;;
+    3|abort)        ACTION=abort ;;
+    *) usage_error "'${REPLY_VALUE}' is not watch, promote or abort." ;;
+  esac
+  EQUIV+=" ACTION=${ACTION}"
+  PICKED_BY_MENU=1
+fi
+[[ "$ACTION" == "watch" ]] && ACTION=status
 case "$ACTION" in
   status|promote|abort) ;;
-  *) echo "ERROR: action must be status, promote or abort (got '${ACTION}')." >&2; exit 1 ;;
+  *) usage_error "ACTION must be watch, promote or abort (got '${ACTION}')." ;;
 esac
 
-# What each Rollout is doing. Empty fields if the cluster cannot be reached.
+# --- 2. Which cluster? One at a time: two canaries are two separate judgments. ---
+VERB="$ACTION"; [[ "$ACTION" == "status" ]] && VERB="watch"
+pick_cluster "$VERB a canary on" no "running"
+CLUSTER_NAME="${PICKED_CLUSTERS[0]}"
+CONTEXT="$(cluster_context "$CLUSTER_NAME")"
+[[ -z "${CLUSTER:-}" ]] && PICKED_BY_MENU=1
+
+# What each Rollout is doing on this cluster.
 rollout_fields() { # <service> -> "<stableRS> <currentPodHash> <phase>"
   kubectl --context "$CONTEXT" -n "$NAMESPACE" get rollout "$1" \
     -o jsonpath='{.status.stableRS} {.status.currentPodHash} {.status.phase}{"\n"}' 2>/dev/null || true
@@ -36,12 +66,10 @@ rs_tag() { # <hash>
   echo "${image##*:}"
 }
 
-# One line per service for the menu. Also fills IN_FLIGHT with the services that
-# have a new version rolling out, which decides the default choice.
+# Sets DESC, and adds to IN_FLIGHT. Runs in the main shell on purpose: a command
+# substitution is a subshell and would lose the IN_FLIGHT update.
 declare -a IN_FLIGHT=()
 DESC=""
-# Sets DESC rather than printing it: this must run in the main shell, because a
-# command substitution is a subshell and would lose the IN_FLIGHT update.
 describe() { # <service>
   local stable current phase running canary
   read -r stable current phase <<< "$(rollout_fields "$1")" || true
@@ -57,39 +85,19 @@ describe() { # <service>
   fi
 }
 
-usage() {
-  {
-    echo "ERROR: $1"
-    echo
-    echo "  Usage:    gmake canary-${ACTION} SVC=service-1"
-    echo "  Services: service-1 or service-2. Promote service-2 first: service-1 calls it."
-    echo
-    echo "  Rollouts in ${NAMESPACE} right now:"
-    for s in "${SERVICES[@]}"; do describe "$s"; echo "    $s   $DESC"; done
-    echo
-    echo "  Run gmake canary-${ACTION} with no SVC in a terminal to be asked instead."
-  } >&2
-  exit 1
-}
-
-PICKED=0
+# --- 3. Which service? Show what each one is doing first. ---------------------
 if [[ -z "$SVC" ]]; then
-  if [[ ! -t 0 ]]; then usage "SVC is required: the service whose prod rollout to act on."; fi
+  is_tty || usage_error "SVC is required (service-1 or service-2)." \
+    "gmake canary ACTION=${ACTION} CLUSTER=${CLUSTER_NAME} SVC=service-2"
   echo
-  case "$ACTION" in
-    status)  echo "Which service do you want to watch?" ;;
-    promote) echo "Which service do you want to promote?" ;;
-    abort)   echo "Which service do you want to abort?" ;;
-  esac
+  echo "Which service on ${CLUSTER_NAME}?"
   i=1
-  for s in "${SERVICES[@]}"; do
+  for s in "${LFI_SERVICES[@]}"; do
     describe "$s"
     printf '  %d) %-10s %s\n' "$i" "$s" "$DESC"
     i=$((i + 1))
   done
 
-  # Default: the one thing in flight. When both are and we are promoting, service-2
-  # goes first because service-1 calls it.
   DEFAULT=""
   if [[ ${#IN_FLIGHT[@]} -eq 1 ]]; then
     DEFAULT="${IN_FLIGHT[0]}"
@@ -101,60 +109,57 @@ if [[ -z "$SVC" ]]; then
   if [[ ${#IN_FLIGHT[@]} -eq 0 && "$ACTION" != "status" ]]; then
     echo
     echo "  Nothing is rolling out right now, so there is nothing to ${ACTION}."
+    echo "  Merge a release PR first (gmake release), or check: gmake status"
   fi
   echo
-  if [[ -n "$DEFAULT" ]]; then
-    read -r -p "Choose a number or type the name [Enter for ${DEFAULT}, q to cancel]: " choice
-    [[ -z "$choice" ]] && choice="$DEFAULT"
+  ask "Choose a number or name" "$DEFAULT"
+  if [[ "$REPLY_VALUE" =~ ^[0-9]+$ && "$REPLY_VALUE" -ge 1 && "$REPLY_VALUE" -le ${#LFI_SERVICES[@]} ]]; then
+    SVC="${LFI_SERVICES[$((REPLY_VALUE - 1))]}"
   else
-    read -r -p "Choose a number or type the name (Enter to cancel): " choice
-    [[ -n "$choice" ]] || { echo "Cancelled. Nothing changed."; exit 1; }
+    SVC="$REPLY_VALUE"
   fi
-  [[ "$choice" == "q" ]] && { echo "Cancelled. Nothing changed."; exit 1; }
-  if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -le ${#SERVICES[@]} ]]; then
-    SVC="${SERVICES[$((choice - 1))]}"
-  else
-    SVC="$choice"
-  fi
-  PICKED=1
+  EQUIV+=" SVC=${SVC}"
+  PICKED_BY_MENU=1
 fi
 
-if [[ " ${SERVICES[*]} " != *" $SVC "* ]]; then
-  usage "SVC must be one of: ${SERVICES[*]} (got '$SVC')."
-fi
+[[ " ${LFI_SERVICES[*]} " == *" $SVC "* ]] || usage_error "SVC must be service-1 or service-2 (got '${SVC}')."
 
-# promote and abort change what is serving traffic, so when the service was
-# chosen from a menu, confirm. Naming SVC on the command line is already a
-# deliberate act and behaves as it always did. YES=1 skips this too.
-if [[ "$PICKED" -eq 1 && "$ACTION" != "status" && "${ASSUME_YES:-}" != "1" ]]; then
+# --- 4. Confirm, when a menu chose for you and the action changes traffic. ----
+if [[ "$PICKED_BY_MENU" -eq 1 && "$ACTION" != "status" && "${ASSUME_YES:-}" != "1" ]]; then
   echo
   IN_FLIGHT=(); describe "$SVC"
-  echo "  $SVC: $DESC"
+  echo "  ${CLUSTER_NAME}/${SVC}: ${DESC}"
   case "$ACTION" in
     promote) echo "  Promoting finishes the rollout: the new build takes all the traffic." ;;
     abort)   echo "  Aborting scales the canary to zero. Stable keeps serving, and Git still points at the new build." ;;
   esac
-  read -r -p "Go ahead and ${ACTION} $SVC? [y/N] " answer
-  [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled. Nothing changed."; exit 1; }
+  confirm "Go ahead and ${ACTION} ${SVC} on ${CLUSTER_NAME}?"
 fi
 
+show_equivalent "gmake canary"
+
+# --- 5. Do it, then point at what comes next. -------------------------------
 case "$ACTION" in
   status)
-    echo "Watching $SVC. Ctrl-C stops watching and does not affect the rollout."
-    echo "When it shows Paused: gmake canary-promote SVC=$SVC   or   gmake canary-abort SVC=$SVC"
+    echo
+    echo "Watching ${CLUSTER_NAME}/${SVC}. Ctrl-C stops watching and does not affect the rollout."
+    echo "When it shows Paused:  gmake canary ACTION=promote CLUSTER=${CLUSTER_NAME} SVC=${SVC}"
+    echo "                       gmake canary ACTION=abort   CLUSTER=${CLUSTER_NAME} SVC=${SVC}"
     exec kubectl argo rollouts get rollout "$SVC" -n "$NAMESPACE" --context "$CONTEXT" --watch
     ;;
   promote)
     kubectl argo rollouts promote "$SVC" -n "$NAMESPACE" --context "$CONTEXT"
-    echo
-    echo "Promoted. Watch it finish: gmake canary-status SVC=$SVC"
-    echo "If both services are in this release, promote service-2 before service-1."
+    STEPS=("gmake canary          choose 'watch' to follow it finish" "gmake status          check every build at once")
+    [[ "$SVC" == "service-2" ]] && STEPS=("gmake canary          now promote service-1 if it is in this release" "${STEPS[@]}")
+    next_steps "${STEPS[@]}"
     ;;
   abort)
     kubectl argo rollouts abort "$SVC" -n "$NAMESPACE" --context "$CONTEXT"
     echo
     echo "Canary removed from service. Stable is unaffected."
     echo "This does NOT undo the release: Git still points prod at the bad tag,"
-    echo "so the next sync will try again. Revert the release PR to make it stick."
+    echo "so the next sync will try again. Make it stick by going back:"
+    next_steps "gmake rollback         open a PR that sets ${SVC} back to the last good build" \
+               "gmake status           confirm what is running"
     ;;
 esac

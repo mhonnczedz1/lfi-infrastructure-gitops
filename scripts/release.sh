@@ -1,13 +1,33 @@
 #!/usr/bin/env bash
 # Opens the weekly prod release PR.
 #
+# Usage: scripts/release.sh
+#   Asks which cluster to release to (local, eks, or both) and which service
+#   (service-1, service-2, or both). Name them up front and nothing is asked:
+#     gmake release CLUSTER=eks SVC=service-1
+#   Clusters are allowed to drift apart: releasing to one leaves the other where
+#   it was, until you release to it.
+#
 # Reads the image tags the dev overlay is currently running and writes them
 # into the prod overlay. Nothing is built: the images already exist in GHCR and
 # have been serving dev traffic all week. This script only moves a reference.
 set -euo pipefail
 
-SERVICES=(service-1 service-2)
-TREES=(local eks)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+# Each cluster has its own overlay tree, named after it: overlays/local, overlays/eks.
+pick_cluster "release to" yes
+pick_service "release" yes
+TREES=("${PICKED_CLUSTERS[@]}")
+SERVICES=("${PICKED_SERVICES[@]}")
+show_equivalent "gmake release"
+
+# A partial release says so in the title, so two PRs for different clusters in the
+# same week are easy to tell apart.
+SCOPE="${TREES[*]} / ${SERVICES[*]}"
+PARTIAL=0
+[[ ${#TREES[@]} -lt ${#LFI_CLUSTERS[@]} || ${#SERVICES[@]} -lt ${#LFI_SERVICES[@]} ]] && PARTIAL=1
 # %G is the ISO week-numbering year, not the calendar year. They diverge at
 # New Year: 2027-01-01 falls in ISO week 53 of 2026, so %Y-W%V would name that
 # release 2027-W53, a week that does not exist. UTC to match CI.
@@ -78,7 +98,9 @@ if [[ ${#CHANGES[@]} -eq 0 && ${#BLOCKED[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#CHANGES[@]} -eq 0 ]]; then
-  echo "Nothing to release: prod already matches dev."
+  echo "Nothing to release: prod already matches dev for ${SCOPE}."
+  next_steps "gmake status           compare dev and prod on every cluster" \
+             "gmake release          choose a different cluster or service"
   exit 0
 fi
 
@@ -113,11 +135,13 @@ while git show-ref --verify --quiet "refs/heads/${BRANCH}" \
 done
 # What the commit and PR are called, for example 2026-W40-B3.
 RELEASE_ID="${BRANCH#release/}"
+TITLE="release(prod): ${RELEASE_ID}"
+[[ "$PARTIAL" -eq 1 ]] && TITLE+=" [${SCOPE}]"
 
 git switch -c "$BRANCH"
 
 # Write the new tags. This is the entire mechanical content of a release.
-BODY="## Release ${RELEASE_ID}"$'\n\n'"| Tree / service | From | To |"$'\n'"|---|---|---|"$'\n'
+BODY="## Release ${RELEASE_ID}"$'\n\n'"Scope: ${SCOPE}"$'\n\n'"| Tree / service | From | To |"$'\n'"|---|---|---|"$'\n'
 for change in "${CHANGES[@]}"; do
   IFS='|' read -r tree svc from to <<< "$change"
   yq -i '(.images[] | select(.name == "'"$svc"'") | .newTag) = "'"$to"'"' \
@@ -138,10 +162,14 @@ if [[ ${#BLOCKED[@]} -gt 0 ]]; then
 fi
 
 git add kubernetes/overlays/local/prod kubernetes/overlays/eks/prod
-git commit -m "release(prod): ${RELEASE_ID}"
+git commit -m "$TITLE"
 git push -u origin "$BRANCH"
 
-gh pr create --title "release(prod): ${RELEASE_ID}" --body "$BODY" --base main
+gh pr create --title "$TITLE" --body "$BODY" --base main
 
 git switch main
 echo "PR opened. Review the diff: it is your release note."
+next_steps "merge the PR           ArgoCD then starts a canary that pauses at 50 percent." \
+           "gmake status           watch the new build arrive" \
+           "gmake canary           promote it. service-2 first: service-1 calls it." \
+           "gmake rollback         go back to the last good build if it misbehaves"

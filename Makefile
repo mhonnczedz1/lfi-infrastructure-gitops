@@ -20,10 +20,29 @@ SHELL := /bin/bash
 # Variables. := assigns once, immediately, as opposed to = which re-expands
 # on every use.
 # ---------------------------------------------------------------------------
-CLUSTER  := platform
+# The k3d cluster's name. Not CLUSTER: that word is reserved for the question every
+# command asks, local or eks, so CLUSTER=eks on the command line cannot clobber it.
+K3D_CLUSTER := platform
 
 # Used by resume. Also here because ad-hoc kubectl commands want it.
-CONTEXT  := k3d-$(CLUSTER)
+CONTEXT  := k3d-$(K3D_CLUSTER)
+
+EKS_CLUSTER := lfi-eks
+EKS_REGION  := ap-southeast-2
+EKS_CONTEXT := $(EKS_CLUSTER)
+
+# ---------------------------------------------------------------------------
+# PASS: hands the answers given on the command line to the scripts, which ask
+# for whatever is missing. An empty value means "not given, so ask".
+#
+#   CLUSTER      local, eks or both
+#   SVC          service-1, service-2 or both
+#   ENVIRONMENT  dev, prod or both
+#   ACTION       watch, promote or abort (canary only)
+#   TO           the build, release or commit to go back to (rollback only)
+#   YES=1        skip the confirmation prompts
+# ---------------------------------------------------------------------------
+PASS := CLUSTER="$(CLUSTER)" SVC="$(SVC)" ENVIRONMENT="$(ENVIRONMENT)" ACTION="$(ACTION)" TO="$(TO)" ASSUME_YES="$(YES)" MAKE="$(MAKE)"
 
 # CURDIR is the directory make was invoked from, so ENV_FILE is absolute and
 # stays correct after a recipe does `cd`.
@@ -63,8 +82,9 @@ endef
 # Declare targets that are names of actions, not files to be built. Without
 # this, a file called `up` appearing in this directory would make `gmake up`
 # say "nothing to be done".
-.PHONY: help check-env cluster-up platform-up up pause resume down destroy \
-        release rollback prod-current dev-current urls canary-status canary-promote canary-abort
+.PHONY: help check-env up down destroy pause resume status release rollback canary \
+        _local-cluster _local-platform _local-up _local-down _local-destroy \
+        _eks-cluster _eks-platform _eks-up _eks-down _eks-destroy
 
 ##@ Help
 
@@ -83,9 +103,12 @@ help: ## Show every command, grouped by purpose, with usage
 	  /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5); next } \
 	  /^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo
-	@echo "Usage: gmake <command> [VAR=value]"
-	@echo "A command that needs a value says so above, for example SVC=service-1."
-	@echo "Bring the platform up from scratch with: gmake up"
+	@echo "Every command asks for what it needs: the cluster (local, eks or both), the"
+	@echo "service, and so on. Answer up front to skip a question, for example:"
+	@echo "  gmake release CLUSTER=eks SVC=service-1"
+	@echo "After an interactive run the command prints its own skip-the-questions form."
+	@echo "Variables: CLUSTER, SVC, ENVIRONMENT, ACTION, TO. Add YES=1 to skip confirmations."
+	@echo "Start here: gmake up, then gmake status."
 
 ##@ Setup
 
@@ -135,43 +158,24 @@ check-env: ## Fail fast if .env is missing or incomplete
 ##@ Cluster lifecycle
 
 # ---------------------------------------------------------------------------
-# cluster-up: stage 1 of the two-stage split. Creates the k3d cluster using
-# only the null provider, so nothing needs a reachable cluster at plan time.
-# No TF_VAR_* exports here: this module takes no secrets.
+# up, down, destroy: ask which cluster (local, eks or both), say what is about to
+# happen and what it costs, then run the matching internal targets below in a
+# safe order. The scripts hold the questions; the internal targets hold the
+# Terraform.
 # ---------------------------------------------------------------------------
-cluster-up: check-env ## Stage 1: create the k3d cluster
-	cd terraform/local/01-cluster
-# -input=false makes Terraform fail rather than prompt, which is what you want
-# in a scripted path. A prompt here would mean a variable is missing.
-	terraform init -input=false
-	terraform apply -auto-approve -input=false
-	@if [[ "$(MAKECMDGOALS)" == "cluster-up" ]]; then echo; echo "Cluster is up. Next: gmake platform-up (or gmake up runs both stages)."; fi
+up: ## Bring a cluster up. Asks: local, eks or both
+	$(PASS) ./scripts/cluster.sh up
+
+down: ## Remove a cluster's platform but keep the cluster. Asks which
+	$(PASS) ./scripts/cluster.sh down
+
+destroy: ## Destroy a cluster and its data. Asks which, and makes you type it
+	$(PASS) ./scripts/cluster.sh destroy
 
 # ---------------------------------------------------------------------------
-# platform-up: stage 2. Configures resources *inside* the cluster, so its
-# kubernetes and helm providers need stage 1 to have already run.
-# This is where the .env -> Terraform bridge actually happens.
-# ---------------------------------------------------------------------------
-platform-up: check-env ## Stage 2: secret, ArgoCD, root application
-	$(tf_env)
-	cd terraform/local/02-platform
-	terraform init -input=false
-	terraform apply -auto-approve -input=false
-	@echo
-	@echo "ArgoCD is installed and the root Application is applied. Next:"
-	@echo "  gmake urls                                                     where each environment answers"
-	@echo "  kubectl --context $(CONTEXT) -n argocd get applications        watch them sync, up to 3 minutes"
-
-# ---------------------------------------------------------------------------
-# up: the only bring-up command you should need. Prerequisites run left to
-# right, which is what enforces cluster-before-platform.
-# ---------------------------------------------------------------------------
-up: cluster-up platform-up ## Full bring-up, in the required order
-
-# ---------------------------------------------------------------------------
-# pause / resume: the cheapest lifecycle pair. Neither one touches Terraform,
-# because nothing about the desired state changes: the node containers are
-# simply stopped and started again.
+# pause / resume: the cheapest lifecycle pair, local only (EKS cannot be paused;
+# it bills until destroyed). Neither one touches Terraform, because nothing about
+# the desired state changes: the node containers are simply stopped and started.
 #
 # Reach for these when you are stepping away. `down` and `destroy` both throw
 # work away and cost minutes to undo; pause costs seconds and keeps images,
@@ -179,41 +183,85 @@ up: cluster-up platform-up ## Full bring-up, in the required order
 # same effect implicitly, so a paused cluster is also what you get after a
 # reboot.
 # ---------------------------------------------------------------------------
-pause: ## Stop the cluster containers, keeping all state
-	k3d cluster stop $(CLUSTER)
+pause: ## Stop the local cluster, keeping all state. Then: gmake resume
+	k3d cluster stop $(K3D_CLUSTER)
 	@echo "Cluster stopped, state kept. Start it again with: gmake resume"
 
-resume: ## Start a paused cluster and wait for its nodes
-	k3d cluster start $(CLUSTER)
+resume: ## Start the paused local cluster and wait for its nodes
+	k3d cluster start $(K3D_CLUSTER)
 # k3d returns as soon as the containers are running, which is well before k3s
 # inside them is serving. Without this wait the next kubectl in your shell
 # tends to fail with a connection refused, which looks like a broken cluster
 # and is not. Pods need another moment beyond this to finish restarting.
 	kubectl --context $(CONTEXT) wait --for=condition=Ready nodes --all --timeout=120s
-	@echo "Nodes are ready. Pods need another moment. Check: kubectl --context $(CONTEXT) -n argocd get applications"
+	@echo "Nodes are ready. Pods need another moment. Check with: gmake status"
+
+##@ Look
+
+status: ## Show which build runs where, in Git and in the cluster. Asks cluster and environment
+	$(PASS) ./scripts/status.sh
+
+##@ Ship
 
 # ---------------------------------------------------------------------------
-# down: undo stage 2 only. The cluster survives, so this is the cheap way to
-# reset ArgoCD without waiting on a k3s image pull again.
+# release, rollback: open a PR. Neither applies anything. Prod changes when you
+# merge, and ArgoCD picks it up from there. That separation is the gate.
 #
-# This removes the postgres-credentials Secret. The PVC and its data are
-# untouched, because ArgoCD created those, not Terraform.
-#
-# check-env and $(tf_env) are here for the same reason they are on platform-up:
-# destroy has to evaluate the root module, so the no-default variables in
-# variables.tf are just as required going down as they were coming up.
+# Clusters may drift apart. Releasing to one leaves the other where it was.
 # ---------------------------------------------------------------------------
-down: check-env ## Remove in-cluster platform resources, keep the cluster
+release: ## Open a release PR promoting dev to prod. Asks: cluster, service
+	$(PASS) ./scripts/release.sh
+
+rollback: ## Open a PR going back to an earlier prod build. Asks: cluster, service, target
+	$(PASS) ./scripts/rollback.sh "$(SVC)" "$(TO)"
+
+# ---------------------------------------------------------------------------
+# canary: operate on an in-flight prod rollout: watch it, promote it or abort it.
+# These change no desired state, which is why they are commands rather than
+# commits. They advance or unwind a convergence toward what Git already says.
+# ---------------------------------------------------------------------------
+canary: ## Watch, promote or abort a prod canary. Asks: what, cluster, service
+	$(PASS) NAMESPACE=platform-prod ./scripts/canary.sh "$(ACTION)" "$(SVC)"
+
+# ---------------------------------------------------------------------------
+# Internals, called by the commands above. Not meant to be run directly, and
+# deliberately without a `##` description so `gmake help` does not list them.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Local cluster. Stage 1 creates the k3d cluster using only the null provider, so
+# nothing needs a reachable cluster at plan time. Stage 2 configures what is
+# *inside* it, so its kubernetes and helm providers need stage 1 to have run.
+# Stage 2 is where the .env -> Terraform bridge happens.
+# ---------------------------------------------------------------------------
+_local-cluster: check-env
+	cd terraform/local/01-cluster
+# -input=false makes Terraform fail rather than prompt, which is what you want
+# in a scripted path. A prompt here would mean a variable is missing.
+	terraform init -input=false
+	terraform apply -auto-approve -input=false
+
+_local-platform: check-env
+	$(tf_env)
+	cd terraform/local/02-platform
+	terraform init -input=false
+	terraform apply -auto-approve -input=false
+
+# Prerequisites run left to right, which is what enforces cluster-before-platform.
+_local-up: _local-cluster _local-platform
+
+# Undo stage 2 only. The cluster survives, so this is the cheap way to reset
+# ArgoCD without waiting on a k3s image pull again. It removes the
+# postgres-credentials Secret; the PVC and its data are untouched, because ArgoCD
+# created those, not Terraform. check-env and $(tf_env) are needed for the same
+# reason as going up: destroy has to evaluate the root module, so the no-default
+# variables are just as required going down as they were coming up.
+_local-down: check-env
 	$(tf_env)
 	cd terraform/local/02-platform
 	terraform destroy -auto-approve -input=false
-	@echo "Platform removed, cluster kept. Bring it back with: gmake platform-up"
 
-# ---------------------------------------------------------------------------
-# destroy: full teardown, in reverse order. Deletes the cluster and therefore
-# the PVC and every row in the database.
-# ---------------------------------------------------------------------------
-destroy: ## Tear down everything including the cluster
+_local-destroy:
 # `|| echo` keeps the teardown going when stage 2 fails. Deliberate: if the
 # cluster is already gone, stage 2's destroy cannot reach it, and that should
 # not block deleting the cluster itself.
@@ -221,84 +269,44 @@ destroy: ## Tear down everything including the cluster
 # This CANNOT be a leading `-`. Under .ONESHELL the whole recipe is one shell
 # script, and the -e in .SHELLFLAGS aborts that script at the first failure.
 # A `-` only stops make from *reporting* the failure, which it does after the
-# shell has already skipped the two lines below, so `gmake destroy` exits 0
-# having destroyed nothing. `|| ...` is how you opt one command out of -e.
-	$(MAKE) down || echo "WARNING: stage 2 destroy failed. Continuing to delete the cluster." >&2
+# shell has already skipped the lines below. `|| ...` is how you opt one
+# command out of -e.
+	$(MAKE) _local-down || echo "WARNING: stage 2 destroy failed. Continuing to delete the cluster." >&2
 	cd terraform/local/01-cluster
 	terraform destroy -auto-approve -input=false
-	@echo "Everything removed, including the database. Rebuild from scratch with: gmake up"
-
-##@ Release and canary
 
 # ---------------------------------------------------------------------------
-# release: open the weekly prod promotion PR.
-#
-# Deliberately does NOT apply anything. It only opens a PR. Prod changes when
-# you merge, and ArgoCD picks it up from there. That separation is the gate.
+# EKS cluster. They never touch the local cluster, and the local targets never
+# touch EKS, which is what keeps the two independent.
 # ---------------------------------------------------------------------------
-release: ## Open the weekly prod release PR
-	./scripts/release.sh
+_eks-cluster:
+	cd terraform/eks/01-cluster
+	terraform init -input=false
+	terraform apply -auto-approve -input=false
+	aws eks update-kubeconfig --region $(EKS_REGION) --name $(EKS_CLUSTER) --alias $(EKS_CONTEXT)
 
-# ---------------------------------------------------------------------------
-# prod-current, dev-current: which build each service is on right now.
-#
-# Shows what Git says (origin/main) next to what the cluster is serving, plus
-# any canary in flight. Read-only. The script does the work so the same logic
-# serves both environments.
-# ---------------------------------------------------------------------------
-prod-current: ## Show the builds running in prod, in Git and in the cluster
-	./scripts/current-builds.sh prod
+_eks-platform: check-env
+	$(tf_env)
+	cd terraform/eks/02-platform
+	terraform init -input=false
+	terraform apply -auto-approve -input=false
 
-dev-current: ## Show the builds running in dev, in Git and in the cluster
-	./scripts/current-builds.sh dev
+_eks-up: _eks-cluster _eks-platform
 
-# ---------------------------------------------------------------------------
-# rollback: open a PR that sets one prod service back to an earlier build.
-#
-# Like release, it only opens a PR. The gate is the merge. All argument
-# checking and the hints for a missing SVC or TO live in the script, which
-# prints the recent builds and releases you can choose from.
-#
-# Usage: gmake rollback                                  asks which service, then what to
-#                                                        go back to, then confirms
-#        gmake rollback SVC=service-1 TO=26W39B2        a build name
-#        gmake rollback SVC=service-1 TO=2026-W38       a release name
-#        gmake rollback SVC=service-1 TO=7e25e45        a commit hash
-#        add YES=1 to skip the confirmation prompt
-# ---------------------------------------------------------------------------
-rollback: ## Roll a prod service back via PR. Asks if run bare, or SVC=service-1 TO=<build|release|commit>
-	ASSUME_YES="$(YES)" ./scripts/rollback.sh "$(SVC)" "$(TO)"
+_eks-down: check-env
+# Delete the root Application first so ArgoCD stops recreating things while
+# Terraform removes the namespaces. || true because it may already be gone.
+	kubectl --context $(EKS_CONTEXT) -n argocd delete application root --wait=true --timeout=180s || true
+	$(tf_env)
+	cd terraform/eks/02-platform
+	terraform destroy -auto-approve -input=false
 
-# ---------------------------------------------------------------------------
-# urls: print where each environment answers. Trivial, and saves you
-# remembering which hostname is which every time.
-# ---------------------------------------------------------------------------
-urls: ## Print the ingress URLs for both environments
-	@echo "dev    http://dev.localhost:8080"
-	@echo "prod   http://prod.localhost:8080"
-	@echo "argocd http://argocd.localhost:8080"
-
-# ---------------------------------------------------------------------------
-# canary-*: operate on an in-flight prod rollout.
-#
-# These change no desired state, which is why they are commands rather than
-# commits. They advance or unwind a convergence toward what Git already says.
-#
-# Run bare in a terminal and each asks which service, showing every rollout's
-# state first. promote and abort then confirm. Name the service and it acts
-# straight away, as it always did. The logic lives in scripts/canary.sh.
-#
-# Usage: gmake canary-promote                  asks which service
-#        gmake canary-promote SVC=service-2    no questions
-#        add YES=1 to skip the confirmation after a menu choice
-# ---------------------------------------------------------------------------
-ROLLOUT_NS := platform-prod
-
-canary-status: ## Watch an in-flight prod rollout. Asks if SVC is not given
-	CONTEXT=$(CONTEXT) NAMESPACE=$(ROLLOUT_NS) ./scripts/canary.sh status "$(SVC)"
-
-canary-promote: ## Complete a paused prod rollout. Asks if SVC is not given
-	CONTEXT=$(CONTEXT) NAMESPACE=$(ROLLOUT_NS) ASSUME_YES="$(YES)" ./scripts/canary.sh promote "$(SVC)"
-
-canary-abort: ## Scale the canary to zero, leaving stable serving. Asks if SVC is not given
-	CONTEXT=$(CONTEXT) NAMESPACE=$(ROLLOUT_NS) ASSUME_YES="$(YES)" ./scripts/canary.sh abort "$(SVC)"
+_eks-destroy:
+	$(MAKE) _eks-down || echo "WARNING: platform destroy failed. Continuing." >&2
+# Destroying the Traefik release deletes its Service, which asks AWS to delete
+# the load balancer asynchronously. The VPC cannot be deleted while that
+# load balancer's network interfaces exist, so give AWS a moment.
+	sleep 90
+	cd terraform/eks/01-cluster
+	terraform destroy -auto-approve -input=false
+	kubectl config delete-context $(EKS_CONTEXT) || true

@@ -27,7 +27,8 @@ kubernetes/
   base/           one definition of each workload. No namespace, no image tag.
   overlays/       dev and prod. Only the differences: namespace, tag, replicas, host.
 argocd/apps/      six child Applications, three per environment.
-scripts/          release.sh, which opens the weekly prod promotion PR.
+scripts/          the commands behind gmake: lib.sh (shared prompts), cluster.sh, status.sh,
+                  release.sh, rollback.sh, canary.sh.
 releases/         denied-builds.yaml, the veto list.
 ```
 
@@ -37,16 +38,24 @@ apply. Collapse them into one and the first run can never succeed.
 
 ## Common commands
 
+Every command asks for what it needs: the cluster (`local` for k3d, `eks` for AWS, or
+`both` where that is safe), the service, the environment. Answer up front to skip a
+question. After an interactive run, the command prints its own skip-the-questions form.
+
 ```
-gmake up          full bring-up, in the required order
-gmake pause       stop the node containers, keeping all state
-gmake destroy     tear down everything including the cluster
-gmake urls        print the ingress URLs for both environments
-gmake release     open the weekly prod release PR
-gmake canary-status  SVC=service-1   watch an in-flight prod rollout
-gmake canary-promote SVC=service-1   complete a paused rollout
-gmake canary-abort   SVC=service-1   scale the canary to zero
+gmake up        bring a cluster up            gmake up CLUSTER=eks
+gmake down      remove the platform, keep the cluster
+gmake destroy   remove everything, including data (you type the word)
+gmake pause     stop the local cluster        gmake resume starts it again
+gmake status    which build runs where, in Git and in the cluster, plus the addresses
+gmake release   open a PR promoting dev to prod    gmake release CLUSTER=eks SVC=service-1
+gmake rollback  open a PR going back to an earlier prod build
+gmake canary    watch, promote or abort a prod canary
 ```
+
+Variables: `CLUSTER`, `SVC`, `ENVIRONMENT`, `ACTION`, `TO`. `YES=1` skips confirmations.
+With no terminal, a missing answer is an error with examples, never a prompt.
+Clusters may drift apart: releasing to one leaves the other where it was.
 
 `gmake help` lists every target. Note `gmake`, not `make`: macOS ships GNU Make 3.81,
 which silently ignores two directives this Makefile depends on.
