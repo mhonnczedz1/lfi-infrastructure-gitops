@@ -5,7 +5,7 @@
 SHELL := /bin/bash
 
 # Run each recipe as ONE shell script instead of one shell per line.
-# Without this, `cd terraform/01-cluster` would not survive into the next
+# Without this, `cd terraform/local/01-cluster` would not survive into the next
 # line and Terraform would run in the repo root. Needs GNU Make >= 3.82,
 # so invoke this file with gmake, not Apple's make. See Task 1.1.1.
 .ONESHELL:
@@ -140,7 +140,7 @@ check-env: ## Fail fast if .env is missing or incomplete
 # No TF_VAR_* exports here: this module takes no secrets.
 # ---------------------------------------------------------------------------
 cluster-up: check-env ## Stage 1: create the k3d cluster
-	cd terraform/01-cluster
+	cd terraform/local/01-cluster
 # -input=false makes Terraform fail rather than prompt, which is what you want
 # in a scripted path. A prompt here would mean a variable is missing.
 	terraform init -input=false
@@ -154,7 +154,7 @@ cluster-up: check-env ## Stage 1: create the k3d cluster
 # ---------------------------------------------------------------------------
 platform-up: check-env ## Stage 2: secret, ArgoCD, root application
 	$(tf_env)
-	cd terraform/02-platform
+	cd terraform/local/02-platform
 	terraform init -input=false
 	terraform apply -auto-approve -input=false
 	@echo
@@ -205,7 +205,7 @@ resume: ## Start a paused cluster and wait for its nodes
 # ---------------------------------------------------------------------------
 down: check-env ## Remove in-cluster platform resources, keep the cluster
 	$(tf_env)
-	cd terraform/02-platform
+	cd terraform/local/02-platform
 	terraform destroy -auto-approve -input=false
 	@echo "Platform removed, cluster kept. Bring it back with: gmake platform-up"
 
@@ -224,7 +224,7 @@ destroy: ## Tear down everything including the cluster
 # shell has already skipped the two lines below, so `gmake destroy` exits 0
 # having destroyed nothing. `|| ...` is how you opt one command out of -e.
 	$(MAKE) down || echo "WARNING: stage 2 destroy failed. Continuing to delete the cluster." >&2
-	cd terraform/01-cluster
+	cd terraform/local/01-cluster
 	terraform destroy -auto-approve -input=false
 	@echo "Everything removed, including the database. Rebuild from scratch with: gmake up"
 
