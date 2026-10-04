@@ -1,0 +1,233 @@
+# ---------------------------------------------------------------------------
+# Stage 2 of the two-module split.
+#
+# Unlike 01-cluster, this file DOES declare kubernetes and helm providers, and
+# they need a reachable cluster when the plan is built. That is precisely why
+# it is a separate root module: applying it before stage 1 fails at plan time.
+# ---------------------------------------------------------------------------
+terraform {
+  required_version = ">= 1.9.0"
+
+  required_providers {
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.35"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      # ~> 2.17 means >= 2.17.0 and < 3.0.0. The upper bound is deliberate,
+      # not lazy: v3 changed the provider block syntax below.
+      version = "~> 2.17"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
+  }
+}
+
+# Authenticate by reading your existing kubeconfig rather than by embedding
+# credentials. config_context pins WHICH cluster, so a stray `kubectl config
+# use-context` cannot redirect an apply at your work cluster.
+provider "kubernetes" {
+  config_path    = "~/.kube/config"
+  config_context = var.kube_context
+}
+
+# Same target, separate provider. Helm needs its own connection block.
+# Under helm provider v3 this becomes `kubernetes = { ... }` with an equals
+# sign; the nested-block form below is v2 syntax.
+provider "helm" {
+  kubernetes {
+    config_path    = "~/.kube/config"
+    config_context = var.kube_context
+  }
+}
+
+locals {
+  # Per-environment passwords, assembled from two scalar variables rather than
+  # one map variable. A map would be tidier HCL, but passing JSON through
+  # TF_VAR_* from a Makefile requires quoting that is easy to get wrong and
+  # hard to debug. Two plain strings keep the bridge in Task 10.3.4 readable.
+  env_postgres_passwords = {
+    dev  = var.postgres_password_dev
+    prod = var.postgres_password_prod
+  }
+}
+
+resource "kubernetes_namespace" "env" {
+  for_each = toset(var.environments)
+
+  metadata {
+    name = "${var.namespace_prefix}-${each.key}"
+    labels = {
+      "app.kubernetes.io/managed-by" = "terraform"
+      # Makes `kubectl get ns -l platform.local/environment=prod` work, which
+      # is more useful than it sounds once there are two of everything.
+      "platform.local/environment" = each.key
+    }
+  }
+}
+
+resource "kubernetes_secret" "postgres" {
+  for_each = toset(var.environments)
+
+  metadata {
+    name      = "postgres-credentials"
+    namespace = kubernetes_namespace.env[each.key].metadata[0].name
+  }
+
+  data = {
+    POSTGRES_USER     = var.postgres_user
+    POSTGRES_PASSWORD = local.env_postgres_passwords[each.key]
+    POSTGRES_DB       = var.postgres_db
+  }
+
+  type = "Opaque"
+}
+
+resource "helm_release" "argo_rollouts" {
+  name             = "argo-rollouts"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-rollouts"
+  version          = var.argo_rollouts_chart_version
+  namespace        = "argo-rollouts"
+  create_namespace = true
+
+  wait    = true
+  timeout = 300
+}
+
+resource "helm_release" "argocd" {
+  name             = "argocd"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-cd"
+  # Pinned via a variable so there is exactly one place to change it.
+  version          = var.argocd_chart_version
+  namespace        = "argocd"
+  # Helm creates this namespace; the platform namespace above is Terraform's.
+  create_namespace = true
+
+  # Block until the release is actually healthy, so the root
+  # Application below never races ahead of a half-started ArgoCD.
+  wait    = true
+  # 600s, because a first run pulls several ArgoCD images.
+  timeout = 600
+
+  # file() reads the values file verbatim, no templating. Keeping it as a real
+  # YAML file means you can lint it and diff it like any other manifest.
+  values = [file("${path.module}/values/argocd.yaml")]
+}
+
+# Rendered to disk rather than piped inline, so the manifest is easy to
+# inspect and 'kubectl apply -f' stays a plain, debuggable command.
+#
+# .generated/ is gitignored: it is Terraform output, not source.
+resource "local_file" "root_app" {
+  filename = "${path.module}/.generated/root-app.yaml"
+  # templatefile() substitutes ${gitops_repo_url} in the .tftpl.
+  content = templatefile("${path.module}/bootstrap/root-app.yaml.tftpl", {
+    gitops_repo_url = var.gitops_repo_url
+  })
+  file_permission = "0644"
+}
+
+# Applied with kubectl rather than the kubernetes_manifest resource on
+# purpose: kubernetes_manifest validates against the API server at PLAN
+# time, and the Application CRD does not exist until the Helm release
+# above has run. That ordering cannot be expressed with depends_on.
+resource "null_resource" "root_application" {
+  # Explicit, because Terraform cannot infer a dependency from a provisioner's
+  # shell command the way it can from a resource attribute reference.
+  depends_on = [helm_release.argocd, local_file.root_app]
+
+  # Re-apply only when the rendered manifest or the target cluster changes.
+  # Hashing the content rather than the filename is what makes an edit to the
+  # template actually trigger a re-apply.
+  triggers = {
+    manifest_sha  = sha256(local_file.root_app.content)
+    kube_context  = var.kube_context
+    manifest_path = local_file.root_app.filename
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+
+      # helm_release returning does not guarantee the CRDs are registered and
+      # accepted by the API server. Applying an Application a moment too early
+      # fails with "no matches for kind", so wait for the CRD explicitly.
+      echo "Waiting for the Application CRD to be established..."
+      kubectl --context "${var.kube_context}" wait \
+        --for condition=established --timeout=120s \
+        crd/applications.argoproj.io
+
+      # The last imperative step in the whole project. From here on, ArgoCD
+      # pulls from Git and nothing outside the cluster applies anything.
+      kubectl --context "${var.kube_context}" apply \
+        -f "${local_file.root_app.filename}"
+    EOT
+  }
+}
+
+# The chart generates a random admin password into a Secret. Printing the
+# command rather than the password keeps the secret out of terraform output
+# and out of the state file.
+output "argocd_admin_password_command" {
+  value = "kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+}
+
+# EKS ships a default class named gp2 using the old in-tree driver. Demote it
+# so the class below is the only default.
+resource "kubernetes_annotations" "gp2_not_default" {
+  api_version = "storage.k8s.io/v1"
+  kind        = "StorageClass"
+  metadata {
+    name = "gp2"
+  }
+  annotations = {
+    "storageclass.kubernetes.io/is-default-class" = "false"
+  }
+  force = true
+}
+
+resource "kubernetes_storage_class_v1" "gp3" {
+  metadata {
+    name = "gp3"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" = "true"
+    }
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy         = "Delete"
+  # Wait until a pod is scheduled, so the volume is created in the same AZ as
+  # the node that will use it.
+  volume_binding_mode    = "WaitForFirstConsumer"
+  allow_volume_expansion = true
+
+  parameters = {
+    type = "gp3"
+  }
+
+  depends_on = [kubernetes_annotations.gp2_not_default]
+}
+
+resource "helm_release" "traefik" {
+  name             = "traefik"
+  repository       = "https://traefik.github.io/charts"
+  chart            = "traefik"
+  version          = var.traefik_chart_version
+  namespace        = "traefik"
+  create_namespace = true
+
+  wait    = true
+  timeout = 300
+
+  values = [file("${path.module}/values/traefik.yaml")]
+}

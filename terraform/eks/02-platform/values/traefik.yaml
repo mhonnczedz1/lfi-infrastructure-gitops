@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/traefik/traefik-helm-chart/v41.6.1/traefik/values.schema.json
+# Registers an IngressClass named "traefik", which is what the base
+# manifests ask for with ingressClassName: traefik.
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+
+service:
+  type: LoadBalancer
+  annotations:
+    # Without this the in-tree cloud provider creates a Classic ELB. An NLB is
+    # cheaper and is what the validation commands in this guide expect.
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+
+# Report the load balancer address on Ingress status objects, so
+# `kubectl get ingress` shows where traffic should go.
+providers:
+  kubernetesIngress:
+    publishedService:
+      enabled: true
+
+# Same discipline as the ArgoCD values: say what you reserve.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 192Mi
