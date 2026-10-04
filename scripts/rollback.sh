@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Opens a PR that rolls one prod service back to an earlier image tag.
 #
-# Usage: scripts/rollback.sh <service> <to>
+# Usage: scripts/rollback.sh [<service> [<to>]]
+#   With no arguments it asks, in a terminal: which service, then what to go back
+#   to (a numbered list of recent builds, or type one), then asks to confirm.
+#   Anything you pass skips that question. Without a terminal, a missing
+#   argument is an error with a hint, never a prompt.
 #   <service>  service-1 or service-2
 #   <to>       what to go back to, in any of three forms:
 #                a build name     26W39B2
@@ -86,12 +90,6 @@ usage() {
   exit 1
 }
 
-if [[ -z "$SVC" ]]; then usage "SVC is required: the service to roll back."; fi
-if [[ " ${SERVICES[*]} " != *" $SVC "* ]]; then
-  usage "SVC must be one of: ${SERVICES[*]} (got '$SVC')."
-fi
-if [[ -z "$TO" ]]; then usage "TO is required: the build, release or commit to go back to."; fi
-
 # Refuse a dirty tree, for the same reason release.sh does: a rollback commit
 # that quietly carries an unrelated change is the surprise this process avoids.
 if [[ -n "$(git status --porcelain)" ]]; then
@@ -99,9 +97,65 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
+# Before any prompt, so the "prod is on ..." and recent-builds lists reflect main.
 git switch main >/dev/null 2>&1
 git pull --ff-only
 git fetch --quiet --prune origin
+
+# Interactive when a person is at the keyboard (stdin is a terminal). With
+# SVC and TO both given it behaves exactly as before, and in a pipe or CI with
+# either missing it still fails with the usage hint instead of waiting forever.
+INTERACTIVE=0
+[[ -t 0 ]] && INTERACTIVE=1
+
+if [[ -z "$SVC" ]]; then
+  if [[ "$INTERACTIVE" -ne 1 ]]; then usage "SVC is required: the service to roll back."; fi
+  echo
+  echo "Which service do you want to roll back in prod?"
+  i=1
+  for s in "${SERVICES[@]}"; do
+    now="$(prod_tag_at HEAD "${TREES[0]}" "$s")"
+    printf '  %d) %-10s prod is on %s\n' "$i" "$s" "${now:-?}"
+    i=$((i + 1))
+  done
+  read -r -p "Choose a number or type the name (Enter to cancel): " choice
+  [[ -n "$choice" ]] || { echo "Cancelled. Nothing changed."; exit 1; }
+  if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -le ${#SERVICES[@]} ]]; then
+    SVC="${SERVICES[$((choice - 1))]}"
+  else
+    SVC="$choice"
+  fi
+fi
+if [[ " ${SERVICES[*]} " != *" $SVC "* ]]; then
+  usage "SVC must be one of: ${SERVICES[*]} (got '$SVC')."
+fi
+
+if [[ -z "$TO" ]]; then
+  if [[ "$INTERACTIVE" -ne 1 ]]; then usage "TO is required: the build, release or commit to go back to."; fi
+  CURRENT="$(prod_tag_at HEAD "${TREES[0]}" "$SVC")"
+  echo
+  echo "$SVC prod is on ${CURRENT:-?}. Roll back to which build?"
+  # Recent prod tags other than the one running, numbered so a digit picks one.
+  declare -a CHOICES=()
+  while IFS= read -r t; do
+    [[ -n "$t" && "$t" != "$CURRENT" ]] && CHOICES+=("$t")
+  done < <(recent_tags "$SVC" 8)
+  i=1
+  for t in "${CHOICES[@]}"; do
+    printf '  %d) %s\n' "$i" "$t"
+    i=$((i + 1))
+  done
+  echo
+  echo "  Or type a build name, a release name (recent: $(recent_releases 3 | paste -sd ', ' -)),"
+  echo "  or a commit hash."
+  read -r -p "Roll back to (Enter to cancel): " choice
+  [[ -n "$choice" ]] || { echo "Cancelled. Nothing changed."; exit 1; }
+  if [[ "$choice" =~ ^[0-9]{1,2}$ && "$choice" -ge 1 && "$choice" -le ${#CHOICES[@]} ]]; then
+    TO="${CHOICES[$((choice - 1))]}"
+  else
+    TO="$choice"
+  fi
+fi
 
 # --- Work out which commit (if any) TO names, and what kind of input it is. ---
 KIND=""

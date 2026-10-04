@@ -64,7 +64,7 @@ endef
 # this, a file called `up` appearing in this directory would make `gmake up`
 # say "nothing to be done".
 .PHONY: help check-env cluster-up platform-up up pause resume down destroy \
-        release rollback urls canary-status canary-promote canary-abort require-svc
+        release rollback prod-current dev-current urls canary-status canary-promote canary-abort
 
 ##@ Help
 
@@ -240,18 +240,33 @@ release: ## Open the weekly prod release PR
 	./scripts/release.sh
 
 # ---------------------------------------------------------------------------
+# prod-current, dev-current: which build each service is on right now.
+#
+# Shows what Git says (origin/main) next to what the cluster is serving, plus
+# any canary in flight. Read-only. The script does the work so the same logic
+# serves both environments.
+# ---------------------------------------------------------------------------
+prod-current: ## Show the builds running in prod, in Git and in the cluster
+	./scripts/current-builds.sh prod
+
+dev-current: ## Show the builds running in dev, in Git and in the cluster
+	./scripts/current-builds.sh dev
+
+# ---------------------------------------------------------------------------
 # rollback: open a PR that sets one prod service back to an earlier build.
 #
 # Like release, it only opens a PR. The gate is the merge. All argument
 # checking and the hints for a missing SVC or TO live in the script, which
 # prints the recent builds and releases you can choose from.
 #
-# Usage: gmake rollback SVC=service-1 TO=26W39B2        a build name
+# Usage: gmake rollback                                  asks which service, then what to
+#                                                        go back to, then confirms
+#        gmake rollback SVC=service-1 TO=26W39B2        a build name
 #        gmake rollback SVC=service-1 TO=2026-W38       a release name
 #        gmake rollback SVC=service-1 TO=7e25e45        a commit hash
 #        add YES=1 to skip the confirmation prompt
 # ---------------------------------------------------------------------------
-rollback: ## Roll a prod service back via PR. SVC=service-1 TO=<build|release|commit>
+rollback: ## Roll a prod service back via PR. Asks if run bare, or SVC=service-1 TO=<build|release|commit>
 	ASSUME_YES="$(YES)" ./scripts/rollback.sh "$(SVC)" "$(TO)"
 
 # ---------------------------------------------------------------------------
@@ -269,41 +284,21 @@ urls: ## Print the ingress URLs for both environments
 # These change no desired state, which is why they are commands rather than
 # commits. They advance or unwind a convergence toward what Git already says.
 #
-# Usage: gmake canary-status SVC=service-1
+# Run bare in a terminal and each asks which service, showing every rollout's
+# state first. promote and abort then confirm. Name the service and it acts
+# straight away, as it always did. The logic lives in scripts/canary.sh.
+#
+# Usage: gmake canary-promote                  asks which service
+#        gmake canary-promote SVC=service-2    no questions
+#        add YES=1 to skip the confirmation after a menu choice
 # ---------------------------------------------------------------------------
 ROLLOUT_NS := platform-prod
 
-# require-svc: the canary commands act on one service, named with SVC. Without
-# it kubectl is handed an empty name and answers with its whole usage text,
-# which says nothing about what to do. This stops first and says it plainly.
-# MAKECMDGOALS is what you typed, so the usage line names the right command.
-require-svc:
-	@if [[ -z "$(SVC)" ]]; then
-	  echo "ERROR: SVC is required. It names the service whose prod rollout to act on." >&2
-	  echo >&2
-	  echo "  Usage:    gmake $(firstword $(MAKECMDGOALS)) SVC=service-1" >&2
-	  echo "  Services: service-1 or service-2. Promote service-2 first: service-1 calls it." >&2
-	  echo >&2
-	  echo "  Rollouts in $(ROLLOUT_NS) right now:" >&2
-	  list="$$(kubectl --context $(CONTEXT) -n $(ROLLOUT_NS) get rollouts --no-headers 2>/dev/null | awk '{printf "    %-12s desired=%s current=%s up-to-date=%s\n", $$1, $$2, $$3, $$4}' || true)"
-	  if [[ -n "$$list" ]]; then echo "$$list" >&2; else echo "    (none found: the cluster may not be running. Try: gmake resume)" >&2; fi
-	  exit 1
-	fi
+canary-status: ## Watch an in-flight prod rollout. Asks if SVC is not given
+	CONTEXT=$(CONTEXT) NAMESPACE=$(ROLLOUT_NS) ./scripts/canary.sh status "$(SVC)"
 
-canary-status: require-svc ## Watch an in-flight prod rollout. SVC=service-1
-	@echo "Watching $(SVC). Ctrl-C stops watching and does not affect the rollout."
-	@echo "When it shows Paused: gmake canary-promote SVC=$(SVC)   or   gmake canary-abort SVC=$(SVC)"
-	kubectl argo rollouts get rollout $(SVC) -n $(ROLLOUT_NS) --watch
+canary-promote: ## Complete a paused prod rollout. Asks if SVC is not given
+	CONTEXT=$(CONTEXT) NAMESPACE=$(ROLLOUT_NS) ASSUME_YES="$(YES)" ./scripts/canary.sh promote "$(SVC)"
 
-canary-promote: require-svc ## Complete a paused prod rollout. SVC=service-1
-	kubectl argo rollouts promote $(SVC) -n $(ROLLOUT_NS)
-	@echo
-	@echo "Promoted. Watch it finish: gmake canary-status SVC=$(SVC)"
-	@echo "If both services are in this release, promote service-2 before service-1."
-
-canary-abort: require-svc ## Scale the canary to zero, leaving stable serving. SVC=service-1
-	kubectl argo rollouts abort $(SVC) -n $(ROLLOUT_NS)
-	@echo
-	@echo "Canary removed from service. Stable is unaffected."
-	@echo "This does NOT undo the release: Git still points prod at the bad tag,"
-	@echo "so the next sync will try again. Revert the release PR to make it stick."
+canary-abort: ## Scale the canary to zero, leaving stable serving. Asks if SVC is not given
+	CONTEXT=$(CONTEXT) NAMESPACE=$(ROLLOUT_NS) ASSUME_YES="$(YES)" ./scripts/canary.sh abort "$(SVC)"
