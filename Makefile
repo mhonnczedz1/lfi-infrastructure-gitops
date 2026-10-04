@@ -63,18 +63,31 @@ endef
 # Declare targets that are names of actions, not files to be built. Without
 # this, a file called `up` appearing in this directory would make `gmake up`
 # say "nothing to be done".
-.PHONY: help check-env cluster-up platform-up up pause resume down destroy
+.PHONY: help check-env cluster-up platform-up up pause resume down destroy \
+        release rollback urls canary-status canary-promote canary-abort require-svc
+
+##@ Help
 
 # ---------------------------------------------------------------------------
-# help: self-documenting target list.
+# help: every command, grouped by purpose, with how to use it.
 #
-# Greps this file for lines of the form `target: ## description` and prints
-# them in cyan. Adding `## something` to any target below is all it takes to
-# get it listed. $$ is how you write a literal $ in a Makefile: make eats one.
+# Reads lines of the form `target: ## description` and prints them in cyan.
+# `##@ Name` header lines split the output into sections. Adding `## something`
+# to any target is all it takes to get it listed, and a `##@ Name` line above
+# a target starts a new section. A description that ends in a VAR=value hint
+# (SVC=service-1) tells you the command needs that variable.
+# $$ is how you write a literal $ in a Makefile: make eats one.
 # ---------------------------------------------------------------------------
-help:
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+help: ## Show every command, grouped by purpose, with usage
+	@awk 'BEGIN {FS = ":.*?## "} \
+	  /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5); next } \
+	  /^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@echo
+	@echo "Usage: gmake <command> [VAR=value]"
+	@echo "A command that needs a value says so above, for example SVC=service-1."
+	@echo "Bring the platform up from scratch with: gmake up"
+
+##@ Setup
 
 # ---------------------------------------------------------------------------
 # check-env: the guard. Every apply target depends on this, so a bad .env
@@ -119,6 +132,8 @@ check-env: ## Fail fast if .env is missing or incomplete
 	echo "OK: .env looks complete." 
 
 
+##@ Cluster lifecycle
+
 # ---------------------------------------------------------------------------
 # cluster-up: stage 1 of the two-stage split. Creates the k3d cluster using
 # only the null provider, so nothing needs a reachable cluster at plan time.
@@ -130,6 +145,7 @@ cluster-up: check-env ## Stage 1: create the k3d cluster
 # in a scripted path. A prompt here would mean a variable is missing.
 	terraform init -input=false
 	terraform apply -auto-approve -input=false
+	@if [[ "$(MAKECMDGOALS)" == "cluster-up" ]]; then echo; echo "Cluster is up. Next: gmake platform-up (or gmake up runs both stages)."; fi
 
 # ---------------------------------------------------------------------------
 # platform-up: stage 2. Configures resources *inside* the cluster, so its
@@ -141,6 +157,10 @@ platform-up: check-env ## Stage 2: secret, ArgoCD, root application
 	cd terraform/02-platform
 	terraform init -input=false
 	terraform apply -auto-approve -input=false
+	@echo
+	@echo "ArgoCD is installed and the root Application is applied. Next:"
+	@echo "  gmake urls                                                     where each environment answers"
+	@echo "  kubectl --context $(CONTEXT) -n argocd get applications        watch them sync, up to 3 minutes"
 
 # ---------------------------------------------------------------------------
 # up: the only bring-up command you should need. Prerequisites run left to
@@ -161,6 +181,7 @@ up: cluster-up platform-up ## Full bring-up, in the required order
 # ---------------------------------------------------------------------------
 pause: ## Stop the cluster containers, keeping all state
 	k3d cluster stop $(CLUSTER)
+	@echo "Cluster stopped, state kept. Start it again with: gmake resume"
 
 resume: ## Start a paused cluster and wait for its nodes
 	k3d cluster start $(CLUSTER)
@@ -169,6 +190,7 @@ resume: ## Start a paused cluster and wait for its nodes
 # tends to fail with a connection refused, which looks like a broken cluster
 # and is not. Pods need another moment beyond this to finish restarting.
 	kubectl --context $(CONTEXT) wait --for=condition=Ready nodes --all --timeout=120s
+	@echo "Nodes are ready. Pods need another moment. Check: kubectl --context $(CONTEXT) -n argocd get applications"
 
 # ---------------------------------------------------------------------------
 # down: undo stage 2 only. The cluster survives, so this is the cheap way to
@@ -185,6 +207,7 @@ down: check-env ## Remove in-cluster platform resources, keep the cluster
 	$(tf_env)
 	cd terraform/02-platform
 	terraform destroy -auto-approve -input=false
+	@echo "Platform removed, cluster kept. Bring it back with: gmake platform-up"
 
 # ---------------------------------------------------------------------------
 # destroy: full teardown, in reverse order. Deletes the cluster and therefore
@@ -203,6 +226,9 @@ destroy: ## Tear down everything including the cluster
 	$(MAKE) down || echo "WARNING: stage 2 destroy failed. Continuing to delete the cluster." >&2
 	cd terraform/01-cluster
 	terraform destroy -auto-approve -input=false
+	@echo "Everything removed, including the database. Rebuild from scratch with: gmake up"
+
+##@ Release and canary
 
 # ---------------------------------------------------------------------------
 # release: open the weekly prod promotion PR.
@@ -212,6 +238,21 @@ destroy: ## Tear down everything including the cluster
 # ---------------------------------------------------------------------------
 release: ## Open the weekly prod release PR
 	./scripts/release.sh
+
+# ---------------------------------------------------------------------------
+# rollback: open a PR that sets one prod service back to an earlier build.
+#
+# Like release, it only opens a PR. The gate is the merge. All argument
+# checking and the hints for a missing SVC or TO live in the script, which
+# prints the recent builds and releases you can choose from.
+#
+# Usage: gmake rollback SVC=service-1 TO=26W39B2        a build name
+#        gmake rollback SVC=service-1 TO=2026-W38       a release name
+#        gmake rollback SVC=service-1 TO=7e25e45        a commit hash
+#        add YES=1 to skip the confirmation prompt
+# ---------------------------------------------------------------------------
+rollback: ## Roll a prod service back via PR. SVC=service-1 TO=<build|release|commit>
+	ASSUME_YES="$(YES)" ./scripts/rollback.sh "$(SVC)" "$(TO)"
 
 # ---------------------------------------------------------------------------
 # urls: print where each environment answers. Trivial, and saves you
@@ -232,13 +273,35 @@ urls: ## Print the ingress URLs for both environments
 # ---------------------------------------------------------------------------
 ROLLOUT_NS := platform-prod
 
-canary-status: ## Watch an in-flight prod rollout. SVC=service-1
+# require-svc: the canary commands act on one service, named with SVC. Without
+# it kubectl is handed an empty name and answers with its whole usage text,
+# which says nothing about what to do. This stops first and says it plainly.
+# MAKECMDGOALS is what you typed, so the usage line names the right command.
+require-svc:
+	@if [[ -z "$(SVC)" ]]; then
+	  echo "ERROR: SVC is required. It names the service whose prod rollout to act on." >&2
+	  echo >&2
+	  echo "  Usage:    gmake $(firstword $(MAKECMDGOALS)) SVC=service-1" >&2
+	  echo "  Services: service-1 or service-2. Promote service-2 first: service-1 calls it." >&2
+	  echo >&2
+	  echo "  Rollouts in $(ROLLOUT_NS) right now:" >&2
+	  list="$$(kubectl --context $(CONTEXT) -n $(ROLLOUT_NS) get rollouts --no-headers 2>/dev/null | awk '{printf "    %-12s desired=%s current=%s up-to-date=%s\n", $$1, $$2, $$3, $$4}' || true)"
+	  if [[ -n "$$list" ]]; then echo "$$list" >&2; else echo "    (none found: the cluster may not be running. Try: gmake resume)" >&2; fi
+	  exit 1
+	fi
+
+canary-status: require-svc ## Watch an in-flight prod rollout. SVC=service-1
+	@echo "Watching $(SVC). Ctrl-C stops watching and does not affect the rollout."
+	@echo "When it shows Paused: gmake canary-promote SVC=$(SVC)   or   gmake canary-abort SVC=$(SVC)"
 	kubectl argo rollouts get rollout $(SVC) -n $(ROLLOUT_NS) --watch
 
-canary-promote: ## Complete a paused prod rollout. SVC=service-1
+canary-promote: require-svc ## Complete a paused prod rollout. SVC=service-1
 	kubectl argo rollouts promote $(SVC) -n $(ROLLOUT_NS)
+	@echo
+	@echo "Promoted. Watch it finish: gmake canary-status SVC=$(SVC)"
+	@echo "If both services are in this release, promote service-2 before service-1."
 
-canary-abort: ## Scale the canary to zero, leaving stable serving. SVC=service-1
+canary-abort: require-svc ## Scale the canary to zero, leaving stable serving. SVC=service-1
 	kubectl argo rollouts abort $(SVC) -n $(ROLLOUT_NS)
 	@echo
 	@echo "Canary removed from service. Stable is unaffected."
