@@ -25,9 +25,9 @@ spec:
     # deliberate, reviewed promotion instead of continuous tracking.
     targetRevision: HEAD
     # Contains only child Application manifests, never workloads.
-    path: argocd/apps
+    path: argocd/apps-local
     directory:
-      # argocd/apps now contains dev/ and prod/ subdirectories rather than
+      # argocd/apps-local contains dev/ and prod/ subdirectories rather than
       # Application manifests directly. Without recurse, ArgoCD reads only the
       # top level, finds nothing, and reports Synced/Healthy having deployed
       # nothing at all.
