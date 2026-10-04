@@ -38,9 +38,9 @@ declare -a CHANGES=()
 declare -a BLOCKED=()
 for svc in "${SERVICES[@]}"; do
   dev_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-    "kubernetes/overlays/dev/$svc/kustomization.yaml")"
+    "kubernetes/overlays/local/dev/$svc/kustomization.yaml")"
   prod_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-    "kubernetes/overlays/prod/$svc/kustomization.yaml")"
+    "kubernetes/overlays/local/prod/$svc/kustomization.yaml")"
 
   [[ "$dev_tag" == "$prod_tag" ]] && continue
 
@@ -87,7 +87,7 @@ BODY="## Release ${WEEK}"$'\n\n'"| Service | From | To |"$'\n'"|---|---|---|"$'\
 for change in "${CHANGES[@]}"; do
   IFS='|' read -r svc from to <<< "$change"
   yq -i '(.images[] | select(.name == "'"$svc"'") | .newTag) = "'"$to"'"' \
-    "kubernetes/overlays/prod/$svc/kustomization.yaml"
+    "kubernetes/overlays/local/prod/$svc/kustomization.yaml"
   BODY+="| \`$svc\` | \`${from:0:12}\` | \`${to:0:12}\` |"$'\n'
 done
 
@@ -103,7 +103,7 @@ if [[ ${#BLOCKED[@]} -gt 0 ]]; then
   done
 fi
 
-git add kubernetes/overlays/prod
+git add kubernetes/overlays/local/prod
 git commit -m "release(prod): ${WEEK}"
 git push -u origin "$BRANCH"
 
