@@ -38,6 +38,16 @@ if [[ "$ACTION" != "up" && ${#ORDER[@]} -eq 2 ]]; then ORDER=(eks local); fi
 
 has() { local c; for c in "${ORDER[@]}"; do [[ "$c" == "$1" ]] && return 0; done; return 1; }
 
+# The local cluster lives in Docker, for every action. Check now, not after
+# Terraform has initialised and k3d has printed a page of errors.
+if has local && ! docker info >/dev/null 2>&1; then
+  echo >&2
+  echo "ERROR: Docker is not running, so the local cluster cannot be reached." >&2
+  echo "  Start OrbStack:  open -a OrbStack" >&2
+  echo "  Then rerun:      ${MAKE_CMD} ${ACTION}" >&2
+  exit 1
+fi
+
 # Say what is about to happen in terms of time and money, before it does.
 echo
 echo "About to ${ACTION}: ${ORDER[*]}"
