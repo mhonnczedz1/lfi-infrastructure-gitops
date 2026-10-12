@@ -50,8 +50,9 @@ if [[ "$ACTION" == "up" ]]; then
     if ! aws sts get-caller-identity >/dev/null 2>&1; then
       echo >&2
       echo "ERROR: AWS credentials are not working, so the EKS cluster cannot be built." >&2
-      echo "  Set a profile:   export AWS_PROFILE=<your profile>" >&2
-      echo "  Log in (if SSO): aws sso login --profile \"\$AWS_PROFILE\"" >&2
+      echo "  Set a profile:    export AWS_PROFILE=<your profile>" >&2
+      echo "  Check your keys:  aws sts get-caller-identity --profile \"\$AWS_PROFILE\"" >&2
+      echo "  Set up the keys:  aws configure --profile \"\$AWS_PROFILE\"" >&2
       exit 1
     fi
   fi
