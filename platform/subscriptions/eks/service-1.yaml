@@ -1,0 +1,11 @@
+# service-1 on the eks cluster. The ApplicationSets read this file.
+name: service-1
+team: team-1
+role: the gateway. Calls service-2.
+dependsOn: [service-2]
+# The repo ArgoCD reads this service's manifests from. The team owns it.
+configRepo: https://github.com/mhonnczedz1/lfi-service-1-config.git
+# Which environments a release promotes between. Defaults to dev then prod.
+promotion:
+  from: dev
+  to: prod

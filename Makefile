@@ -76,6 +76,7 @@ export TF_VAR_postgres_user="$$POSTGRES_USER"
 export TF_VAR_postgres_password_dev="$$POSTGRES_PASSWORD_DEV"
 export TF_VAR_postgres_password_prod="$$POSTGRES_PASSWORD_PROD"
 export TF_VAR_postgres_db="$$POSTGRES_DB"
+export TF_VAR_argocd_repo_pat="$${ARGOCD_REPO_PAT:-}"
 export TF_VAR_gitops_repo_url="$$GITOPS_REPO_URL"
 endef
 
