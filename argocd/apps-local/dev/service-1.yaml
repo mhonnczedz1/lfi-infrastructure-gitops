@@ -6,8 +6,6 @@ metadata:
   # identifier.
   name: service-1-dev
   namespace: argocd
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
