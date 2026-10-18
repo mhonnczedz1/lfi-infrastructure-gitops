@@ -18,9 +18,22 @@
 # After a prompted run, show_equivalent prints the command that would have
 # skipped the questions, so the interactive form teaches the scripted one.
 
-LFI_CLUSTERS=(local eks)
-LFI_SERVICES=(service-1 service-2)
-LFI_STAGES=(dev prod)
+# LFI_CLUSTERS, LFI_SERVICES, NAMESPACE_PREFIX and the cluster_*, service_* and
+# promote_* readers come from platform/registry.yaml and platform/subscriptions/,
+# so adding a service or a cluster never means editing this file.
+source "$(dirname "${BASH_SOURCE[0]}")/reg.sh"
+
+# The environments that exist: every environment any service has on any cluster,
+# found in the config repositories checked out next to this one. Teams choose
+# their own, so this cannot be a fixed list. Empty if no config repo is cloned.
+LFI_STAGES=()
+for _s in "${LFI_SERVICES[@]}"; do
+  for _c in "${LFI_CLUSTERS[@]}"; do
+    for _e in $(service_envs "$_s" "$_c"); do
+      [[ " ${LFI_STAGES[*]-} " == *" $_e "* ]] || LFI_STAGES+=("$_e")
+    done
+  done
+done
 
 PICKED_CLUSTERS=()
 PICKED_SERVICES=()
@@ -46,14 +59,6 @@ usage_error() {
     fi
   } >&2
   exit 1
-}
-
-cluster_context() {
-  case "$1" in
-    local) echo "k3d-platform" ;;
-    eks)   echo "lfi-eks" ;;
-    *)     return 1 ;;
-  esac
 }
 
 cluster_title() { echo "$1 ($(cluster_context "$1"))"; }
@@ -164,9 +169,8 @@ pick_service() {
   menu_label() { echo "$1"; }
   menu_note() {
     case "$1" in
-      service-1) echo "the gateway. Calls service-2." ;;
-      service-2) echo "the worker. Release and promote it first." ;;
-      both)      echo "service-1 and service-2" ;;
+      both) echo "${LFI_SERVICES[*]}" ;;
+      *)    service_role "$1" ;;
     esac
   }
   pick_generic "service" "Which service do you want to ${what}?" "$allow_both" "${SVC:-}" "" "${LFI_SERVICES[@]}"
@@ -179,16 +183,39 @@ pick_service() {
 pick_stage() {
   local what="$1" allow_both="$2"
   menu_label() { echo "$1"; }
+  [[ ${#LFI_STAGES[@]} -gt 0 ]] \
+    || usage_error "No environments found. Clone each service's config repository next to this repository."
   menu_note() {
     case "$1" in
-      dev)  echo "follows every build automatically" ;;
-      prod) echo "changes only when a release PR is merged" ;;
-      both) echo "dev and prod" ;;
+      both) echo "${LFI_STAGES[*]}" ;;
+      *)    echo "" ;;
     esac
   }
   pick_generic "environment" "Which environment do you want to ${what}?" "$allow_both" "${ENVIRONMENT:-}" "" "${LFI_STAGES[@]}"
   PICKED_STAGES=("${PICKED[@]}")
   [[ -z "${ENVIRONMENT:-}" ]] && EQUIV+=" ENVIRONMENT=${PICKED_CHOICE}"
+  return 0
+}
+
+# first_to_promote <service...>: of the services given, the first that another of
+# them depends on, or the first one given if none does. Dependencies go first so
+# each canary judgment is about one change.
+first_to_promote() {
+  local s d
+  for s in "$@"; do
+    for d in "$@"; do
+      [[ "$d" == "$s" ]] && continue
+      [[ " $(service_deps "$d" | tr '\n' ' ') " == *" $s "* ]] && { echo "$s"; return 0; }
+    done
+  done
+  echo "$1"
+}
+
+# called_by_note <service>: ": it is called by service-1", or nothing.
+called_by_note() {
+  local d
+  d="$(service_dependents "$1" | tr '\n' ' ')"
+  [[ -n "$d" ]] && echo ": it is called by ${d% }"
   return 0
 }
 

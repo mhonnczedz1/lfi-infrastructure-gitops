@@ -22,11 +22,21 @@ pick_cluster "look at" yes "running"
 pick_stage "look at" yes
 show_equivalent "gmake status"
 
-# Compare against what is on the remote, not whatever this checkout last pulled.
-git fetch --quiet origin 2>/dev/null || echo "NOTE: could not fetch origin; the GIT column may be stale." >&2
+# Compare against what is on the remote, not whatever each checkout last pulled.
+# The tags live in each service's own config repository.
+for _svc in "${LFI_SERVICES[@]}"; do
+  _cfg="$(service_config_dir "$_svc")"
+  if [[ -d "$_cfg/.git" ]]; then
+    git -C "$_cfg" fetch --quiet origin 2>/dev/null || echo "NOTE: could not fetch $_cfg; its GIT column may be stale." >&2
+  else
+    echo "NOTE: $_svc's config repo is not checked out at $_cfg; its GIT column will show ?." >&2
+  fi
+done
 
 git_tag() { # <cluster> <stage> <service>
-  git show "origin/main:kubernetes/overlays/$1/$2/$3/kustomization.yaml" 2>/dev/null \
+  local cfg
+  cfg="$(service_config_dir "$3")" || return 0
+  git -C "$cfg" show "origin/main:$1/$2/app/kustomization.yaml" 2>/dev/null \
     | SVC="$3" yq '.images[] | select(.name == strenv(SVC)) | .newTag' 2>/dev/null || true
 }
 
@@ -51,7 +61,7 @@ for cluster in "${PICKED_CLUSTERS[@]}"; do
   [[ "$up" -eq 0 ]] && DOWN+=("$cluster")
 
   for stage in "${PICKED_STAGES[@]}"; do
-    ns="platform-${stage}"
+    ns="${NAMESPACE_PREFIX}-${stage}"
     echo
     if [[ "$up" -eq 1 ]]; then
       echo "${cluster} ${stage}   (cluster ${ctx}, namespace ${ns})"
@@ -61,6 +71,11 @@ for cluster in "${PICKED_CLUSTERS[@]}"; do
     printf '  %-11s %-12s %-12s %-12s %s\n' SERVICE GIT RUNNING CANARY STATE
 
     for svc in "${LFI_SERVICES[@]}"; do
+      # A team chooses its own environments, so a service may not have this one.
+      if [[ " $(service_envs "$svc" "$cluster" | tr '\n' ' ') " != *" $stage "* ]]; then
+        printf '  %-11s %s\n' "$svc" "(no ${stage} environment on ${cluster})"
+        continue
+      fi
       git_t="$(git_tag "$cluster" "$stage" "$svc")"; git_t="${git_t:-?}"
       running="n/a"; canary="-"; state="n/a"
 
@@ -116,7 +131,7 @@ done
 # What to do about what was just seen. Each line is a command, in order of urgency.
 STEPS=()
 if [[ ${#PAUSED[@]} -gt 0 ]]; then
-  STEPS+=("gmake canary          ${PAUSED[*]}: a canary is paused, waiting for you. Promote service-2 first.")
+  STEPS+=("gmake canary          ${PAUSED[*]}: a canary is paused, waiting for you. Promote dependencies first.")
 fi
 if [[ ${#ROLLING[@]} -gt 0 ]]; then
   STEPS+=("gmake canary          ${ROLLING[*]}: a rollout is in progress. Choose 'watch' to follow it.")
