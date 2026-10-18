@@ -7,30 +7,38 @@ ArgoCD, Argo Rollouts.
 [local-full-infrastructure](https://github.com/mhonnczedz1/local-full-infrastructure).
 Read the guide for why it is shaped this way; clone this only to compare against your own.
 
-## The two rules
+## The rules
 
 **Nobody runs `kubectl apply` against the cluster.** ArgoCD reconciles continuously, so
 a manual change is reverted within a reconciliation window, silently and with no error.
 Deploying means committing.
 
-**`kubernetes/overlays/prod/` is gated.** CODEOWNERS requires review on that path and on
-`terraform/`, so prod changes only through a reviewed release pull request. Dev is
-continuous and deliberately unowned.
+**This repository holds no service manifests.** A service is a subscription under
+`platform/subscriptions/` that points at a config repository its team owns, and the
+ApplicationSets read that repository. Prod is protected by the team's own repository.
+CODEOWNERS here covers what the platform owns: `platform/`, `argocd/`, `addons/`,
+`releases/`, `scripts/` and `terraform/`.
 
 ## Layout
 
-```
+~~~
+platform/
+  registry.yaml          project identity and clusters
+  subscriptions/         one file per service per cluster: where its config repo is
+  overrides/             optional platform adjustments to a subscription
 terraform/
-  01-cluster/     creates the k3d cluster. null and local providers only.
-  02-platform/    namespaces, secrets, ArgoCD, Argo Rollouts, the root Application.
-kubernetes/
-  base/           one definition of each workload. No namespace, no image tag.
-  overlays/       dev and prod. Only the differences: namespace, tag, replicas, host.
-argocd/apps/      six child Applications, three per environment.
-scripts/          the commands behind gmake: lib.sh (shared prompts), cluster.sh, status.sh,
-                  release.sh, rollback.sh, canary.sh.
-releases/         denied-builds.yaml, the veto list.
-```
+  local/, eks/           01-cluster and 02-platform for each cluster
+argocd/
+  apps-<cluster>/        what root watches: generated ApplicationSets and the teams
+                         project (scripts/gen-appsets.sh writes them)
+addons/<cluster>/        third-party software, one directory per add-on
+scripts/                 the commands behind gmake, the registry readers, the contract
+                         check, the generator, the scaffolder and the stamp script
+releases/                denied-builds.yaml, the veto list.
+~~~
+
+Service manifests live in each service's own `<project>-<service>-config` repository, and
+the components they build on live in `<project>-service-templates`.
 
 Terraform is split into two root modules because the `kubernetes` and `helm` providers
 need a reachable cluster at plan time, and the cluster does not exist during the first
