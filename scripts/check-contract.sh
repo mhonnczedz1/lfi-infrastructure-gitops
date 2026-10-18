@@ -46,6 +46,9 @@ for f in $(subscription_files); do
   [[ "$url" == "$want" ]] || fail "$f: configRepo is $url, expected $want"
   for dep in $(yq '.dependsOn[]?' "$f"); do
     [[ " ${LFI_SERVICES[*]} " == *" $dep "* ]] || fail "$f: dependsOn $dep, which has no subscription"
+    # A service calls its dependency inside its own cluster, so the dependency
+    # must be subscribed on that cluster too, not merely somewhere.
+    [[ -f "$(dirname "$f")/$dep.yaml" ]] || fail "$f: dependsOn $dep, which is not subscribed on the $cluster cluster"
   done
 done
 
