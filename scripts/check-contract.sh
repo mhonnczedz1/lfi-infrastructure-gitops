@@ -8,9 +8,11 @@ cd "$SCRIPT_DIR/.."
 source "$SCRIPT_DIR/reg.sh"
 
 # --online also checks that every config repository named by a subscription can
-# be reached. One unreachable repository stops the ApplicationSets from
-# generating anything at all until it is fixed, so this is worth asking before a
-# subscription ships.
+# be reached, anonymously. An unreachable repository freezes its own service's
+# ApplicationSets until it is fixed, so this is worth asking before a
+# subscription ships. A private repository fails here too, on purpose: config
+# repositories are public by convention, and ArgoCD's credential (Task 20.2.5)
+# is a safety net for a mistake, not permission to make one.
 ONLINE=0
 [[ "${1:-}" == "--online" ]] && ONLINE=1
 
@@ -76,19 +78,34 @@ if [[ "$ONLINE" -eq 1 ]]; then
   done
 fi
 
-# The ApplicationSets and the teams project are generated from the registry.
-# Regenerate into a temporary directory and compare, so a hand edit, or a
-# registry change that forgot to regenerate, is caught. Only once the generator
-# exists (Phase 20.2) and only for files that have been put in place.
+# The ApplicationSets and the teams project are generated from the registry and
+# the subscriptions. Regenerate into a temporary directory and compare, so a hand
+# edit, a new subscription without its sets, or sets left behind by a removed
+# subscription are caught. Only once the generator exists (Phase 20.2) and only
+# once the sets have been put in place (Task 20.3.6).
 if [[ -x "$SCRIPT_DIR/gen-appsets.sh" ]]; then
   gen="$(mktemp -d)"; trap 'rm -rf "$gen"' EXIT
   "$SCRIPT_DIR/gen-appsets.sh" "$gen" >/dev/null
   for cluster in "${LFI_CLUSTERS[@]}"; do
     for kind in services data; do
-      f="argocd/apps-$cluster/appsets/$kind.yaml"
-      if [[ -f "$f" ]] && ! diff -q "$f" "$gen/$kind-$cluster.yaml" >/dev/null; then
-        fail "$f differs from scripts/gen-appsets.sh. Regenerate it: scripts/gen-appsets.sh"
-      fi
+      dir="argocd/apps-$cluster/appsets/$kind"
+      [[ -d "$dir" ]] || continue
+      # Every set the generator writes is in place and unchanged.
+      for g in "$gen/$kind-$cluster-"*.yaml; do
+        [[ -f "$g" ]] || continue
+        svc="$(basename "$g" .yaml)"; svc="${svc#"$kind-$cluster-"}"
+        if [[ ! -f "$dir/$svc.yaml" ]]; then
+          fail "$dir/$svc.yaml is missing. Regenerate: scripts/gen-appsets.sh"
+        elif ! diff -q "$dir/$svc.yaml" "$g" >/dev/null; then
+          fail "$dir/$svc.yaml differs from scripts/gen-appsets.sh. Regenerate it: scripts/gen-appsets.sh"
+        fi
+      done
+      # And nothing is in place that the generator would not write.
+      for f in "$dir"/*.yaml; do
+        [[ -f "$f" ]] || continue
+        [[ -f "$gen/$kind-$cluster-$(basename "$f")" ]] \
+          || fail "$f belongs to no subscription. Regenerate (scripts/gen-appsets.sh) to remove it"
+      done
     done
     f="argocd/apps-$cluster/projects/teams.yaml"
     if [[ -f "$f" ]] && ! diff -q "$f" "$gen/teams-$cluster.yaml" >/dev/null; then
