@@ -1,13 +1,14 @@
+# No defaults for region and cluster_name: platform/registry.yaml owns them and
+# the Makefile passes them as TF_VAR_region and TF_VAR_cluster_name. A run that
+# forgets fails with "No value for required variable" instead of guessing.
 variable "region" {
   type        = string
-  description = "Region the cluster runs in."
-  default     = "ap-southeast-2"
+  description = "Region the cluster runs in. From the registry."
 }
 
 variable "cluster_name" {
   type        = string
-  description = "EKS cluster name. The kube context alias is set to the same value."
-  default     = "lfi-eks"
+  description = "EKS cluster name. The kube context alias is set to the same value. From the registry."
 }
 
 variable "kubernetes_version" {

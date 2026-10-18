@@ -20,15 +20,25 @@ SHELL := /bin/bash
 # Variables. := assigns once, immediately, as opposed to = which re-expands
 # on every use.
 # ---------------------------------------------------------------------------
-# The k3d cluster's name. Not CLUSTER: that word is reserved for the question every
-# command asks, local or eks, so CLUSTER=eks on the command line cannot clobber it.
-K3D_CLUSTER := platform
+# Cluster identity comes from platform/registry.yaml, the one place it is written.
+# Not CLUSTER: that word is reserved for the question every command asks, local
+# or eks, so CLUSTER=eks on the command line cannot clobber these.
+REGISTRY := platform/registry.yaml
+reg = $(shell yq '$(1)' $(REGISTRY))
+
+K3D_CLUSTER      := $(call reg,.clusters[] | select(.kind == "k3d") | .clusterName)
+EKS_CLUSTER      := $(call reg,.clusters[] | select(.kind == "eks") | .clusterName)
+EKS_REGION       := $(call reg,.clusters[] | select(.kind == "eks") | .region)
+STATE_LOCAL      := $(call reg,.clusters[] | select(.kind == "k3d") | .stateKeyPrefix)
+STATE_EKS        := $(call reg,.clusters[] | select(.kind == "eks") | .stateKeyPrefix)
+NAMESPACE_PREFIX := $(call reg,.namespacePrefix)
+
+# An empty value means yq is missing or the registry is unreadable. Stop here
+# rather than let Terraform run with a blank cluster name.
+$(if $(and $(K3D_CLUSTER),$(EKS_CLUSTER),$(EKS_REGION),$(STATE_LOCAL),$(STATE_EKS),$(NAMESPACE_PREFIX)),,$(error Could not read $(REGISTRY). Is yq installed?))
 
 # Used by resume. Also here because ad-hoc kubectl commands want it.
-CONTEXT  := k3d-$(K3D_CLUSTER)
-
-EKS_CLUSTER := lfi-eks
-EKS_REGION  := ap-southeast-2
+CONTEXT     := k3d-$(K3D_CLUSTER)
 EKS_CONTEXT := $(EKS_CLUSTER)
 
 # ---------------------------------------------------------------------------
@@ -78,14 +88,36 @@ export TF_VAR_postgres_password_prod="$$POSTGRES_PASSWORD_PROD"
 export TF_VAR_postgres_db="$$POSTGRES_DB"
 export TF_VAR_argocd_repo_pat="$${ARGOCD_REPO_PAT:-}"
 export TF_VAR_gitops_repo_url="$$GITOPS_REPO_URL"
+export TF_VAR_namespace_prefix="$(NAMESPACE_PREFIX)"
+endef
+
+# The same bridge for what the registry owns. These are variables without
+# defaults in Terraform, so a run that forgets them fails instead of guessing
+# a cluster.
+define local_env
+export TF_VAR_cluster_name="$(K3D_CLUSTER)"
+export TF_VAR_kube_context="$(CONTEXT)"
+endef
+
+define eks_env
+export TF_VAR_cluster_name="$(EKS_CLUSTER)"
+export TF_VAR_region="$(EKS_REGION)"
+export TF_VAR_kube_context="$(EKS_CONTEXT)"
+endef
+
+# terraform init with the state key taken from the registry, so the backend
+# blocks carry no cluster name. Call it as $(call tf_init,<state prefix>,<stage>).
+# Same bucket and same keys as before the registry existed: nothing migrates.
+define tf_init
+terraform init -input=false -backend-config="key=$(1)/$(2)/terraform.tfstate"
 endef
 
 # Declare targets that are names of actions, not files to be built. Without
 # this, a file called `up` appearing in this directory would make `gmake up`
 # say "nothing to be done".
 .PHONY: help check-env up down destroy pause resume status release rollback canary \
-        _local-cluster _local-platform _local-up _local-down _local-destroy \
-        _eks-cluster _eks-platform _eks-up _eks-down _eks-destroy
+        _local-cluster _local-platform _local-up _local-down _local-destroy _local-plan \
+        _eks-cluster _eks-platform _eks-up _eks-down _eks-destroy _eks-plan add-service
 
 ##@ Help
 
@@ -202,6 +234,13 @@ resume: ## Start the paused local cluster and wait for its nodes
 status: ## Show which build runs where, in Git and in the cluster. Asks cluster and environment
 	$(PASS) ./scripts/status.sh
 
+##@ Extend
+
+# Scaffolds a service: a subscription per cluster and a config repository, ready
+# to push. Extra flags go in ARGS, e.g. ARGS="--port 9898 --health /healthz".
+add-service: ## Scaffold a service. NAME=orders IMAGE=ghcr.io/you/orders TAG=1.0.0
+	./scripts/new-service.sh "$(NAME)" --image "$(IMAGE)" --tag "$(TAG)" $(ARGS)
+
 ##@ Ship
 
 # ---------------------------------------------------------------------------
@@ -222,7 +261,7 @@ rollback: ## Open a PR going back to an earlier prod build. Asks: cluster, servi
 # commits. They advance or unwind a convergence toward what Git already says.
 # ---------------------------------------------------------------------------
 canary: ## Watch, promote or abort a prod canary. Asks: what, cluster, service
-	$(PASS) NAMESPACE=platform-prod ./scripts/canary.sh "$(ACTION)" "$(SVC)"
+	$(PASS) NAMESPACE=$(NAMESPACE_PREFIX)-prod ./scripts/canary.sh "$(ACTION)" "$(SVC)"
 
 # ---------------------------------------------------------------------------
 # Internals, called by the commands above. Not meant to be run directly, and
@@ -236,17 +275,31 @@ canary: ## Watch, promote or abort a prod canary. Asks: what, cluster, service
 # Stage 2 is where the .env -> Terraform bridge happens.
 # ---------------------------------------------------------------------------
 _local-cluster: check-env
+	$(local_env)
 	cd terraform/local/01-cluster
 # -input=false makes Terraform fail rather than prompt, which is what you want
 # in a scripted path. A prompt here would mean a variable is missing.
-	terraform init -input=false
+	$(call tf_init,$(STATE_LOCAL),01-cluster)
 	terraform apply -auto-approve -input=false
 
 _local-platform: check-env
 	$(tf_env)
+	$(local_env)
 	cd terraform/local/02-platform
-	terraform init -input=false
+	$(call tf_init,$(STATE_LOCAL),02-platform)
 	terraform apply -auto-approve -input=false
+
+# Plan only, both stages. Exit code 2 means there are changes. Used to prove a
+# refactor changed nothing: it should exit 0 for both.
+_local-plan: check-env
+	$(tf_env)
+	$(local_env)
+	cd terraform/local/01-cluster
+	$(call tf_init,$(STATE_LOCAL),01-cluster)
+	terraform plan -input=false -detailed-exitcode
+	cd ../02-platform
+	$(call tf_init,$(STATE_LOCAL),02-platform)
+	terraform plan -input=false -detailed-exitcode
 
 # Prerequisites run left to right, which is what enforces cluster-before-platform.
 _local-up: _local-cluster _local-platform
@@ -259,7 +312,9 @@ _local-up: _local-cluster _local-platform
 # variables are just as required going down as they were coming up.
 _local-down: check-env
 	$(tf_env)
+	$(local_env)
 	cd terraform/local/02-platform
+	$(call tf_init,$(STATE_LOCAL),02-platform)
 	terraform destroy -auto-approve -input=false
 
 _local-destroy:
@@ -273,7 +328,9 @@ _local-destroy:
 # shell has already skipped the lines below. `|| ...` is how you opt one
 # command out of -e.
 	$(MAKE) _local-down || echo "WARNING: stage 2 destroy failed. Continuing to delete the cluster." >&2
+	$(local_env)
 	cd terraform/local/01-cluster
+	$(call tf_init,$(STATE_LOCAL),01-cluster)
 	terraform destroy -auto-approve -input=false
 
 # ---------------------------------------------------------------------------
@@ -281,16 +338,29 @@ _local-destroy:
 # touch EKS, which is what keeps the two independent.
 # ---------------------------------------------------------------------------
 _eks-cluster:
+	$(eks_env)
 	cd terraform/eks/01-cluster
-	terraform init -input=false
+	$(call tf_init,$(STATE_EKS),01-cluster)
 	terraform apply -auto-approve -input=false
 	aws eks update-kubeconfig --region $(EKS_REGION) --name $(EKS_CLUSTER) --alias $(EKS_CONTEXT)
 
 _eks-platform: check-env
 	$(tf_env)
+	$(eks_env)
 	cd terraform/eks/02-platform
-	terraform init -input=false
+	$(call tf_init,$(STATE_EKS),02-platform)
 	terraform apply -auto-approve -input=false
+
+# Plan only, both stages. Exit code 2 means there are changes.
+_eks-plan: check-env
+	$(tf_env)
+	$(eks_env)
+	cd terraform/eks/01-cluster
+	$(call tf_init,$(STATE_EKS),01-cluster)
+	terraform plan -input=false -detailed-exitcode
+	cd ../02-platform
+	$(call tf_init,$(STATE_EKS),02-platform)
+	terraform plan -input=false -detailed-exitcode
 
 _eks-up: _eks-cluster _eks-platform
 
@@ -299,7 +369,9 @@ _eks-down: check-env
 # Terraform removes the namespaces. || true because it may already be gone.
 	kubectl --context $(EKS_CONTEXT) -n argocd delete application root --wait=true --timeout=180s || true
 	$(tf_env)
+	$(eks_env)
 	cd terraform/eks/02-platform
+	$(call tf_init,$(STATE_EKS),02-platform)
 	terraform destroy -auto-approve -input=false
 
 _eks-destroy:
@@ -308,6 +380,8 @@ _eks-destroy:
 # the load balancer asynchronously. The VPC cannot be deleted while that
 # load balancer's network interfaces exist, so give AWS a moment.
 	sleep 90
+	$(eks_env)
 	cd terraform/eks/01-cluster
+	$(call tf_init,$(STATE_EKS),01-cluster)
 	terraform destroy -auto-approve -input=false
 	kubectl config delete-context $(EKS_CONTEXT) || true

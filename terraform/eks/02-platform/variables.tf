@@ -7,14 +7,22 @@
 # defaults are decisions, no-defaults are secrets or environment.
 # ---------------------------------------------------------------------------
 
+variable "cluster_name" {
+  type        = string
+  description = "EKS cluster name, from the registry via TF_VAR_cluster_name."
+}
+
 variable "kube_context" {
   type        = string
-  description = "kubectl context to target. Pinned to the EKS cluster."
-  default     = "lfi-eks"
+  description = "kubectl context to target. Must equal the cluster name, from the registry."
 
+  # The guard that stops a stray context from receiving this apply. It now
+  # compares against the registry's cluster name instead of a literal, so it
+  # survives the cluster being renamed. Referencing another variable inside a
+  # validation needs Terraform 1.9, which required_version already demands.
   validation {
-    condition     = var.kube_context == "lfi-eks"
-    error_message = "This module only targets the lfi-eks context. Refusing to plan against another cluster."
+    condition     = var.kube_context == var.cluster_name
+    error_message = "kube_context must equal cluster_name. Refusing to plan against another cluster."
   }
 }
 
