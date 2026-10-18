@@ -3,13 +3,23 @@
 #
 # Usage: scripts/gen-appsets.sh [output dir]
 #   With no argument it writes into the repo, where the root Application picks
-#   the files up:
-#     argocd/apps-<cluster>/appsets/services.yaml
-#     argocd/apps-<cluster>/appsets/data.yaml
+#   the files up. Two ApplicationSets per subscription, and one project:
+#     argocd/apps-<cluster>/appsets/services/<service>.yaml
+#     argocd/apps-<cluster>/appsets/data/<service>.yaml
 #     argocd/apps-<cluster>/projects/teams.yaml
-#   With a directory it writes services-<cluster>.yaml, data-<cluster>.yaml and
-#   teams-<cluster>.yaml there instead, and touches nothing in the repo. The
-#   cutover uses that to stage the files before they go live.
+#   With a directory it writes services-<cluster>-<service>.yaml,
+#   data-<cluster>-<service>.yaml and teams-<cluster>.yaml there instead, and
+#   touches nothing in the repo. The cutover uses that to stage the files
+#   before they go live.
+#
+# Why one set per subscription and not one set for all of them: an
+# ApplicationSet whose generator cannot read a repository applies nothing at
+# all until it can. With one set for every service, a single config repository
+# that is deleted, renamed or made private would freeze every service's holds,
+# overrides and changes. With one set each, it freezes only its own service.
+#
+# Each run first removes the sets it wrote last time, so a service whose
+# subscription was deleted loses its generated files too.
 #
 # ArgoCD cannot read the registry, so the few values the ApplicationSets need
 # (the repo URL, the owner, the namespace prefix) are written into them here.
@@ -24,39 +34,54 @@ source "$SCRIPT_DIR/reg.sh"
 STAGE="${1:-}"
 URL="https://github.com/$OWNER/$(yq '.repo' "$REGISTRY").git"
 
-# out <kind> <cluster>: where a generated file goes.
+# out <kind> <cluster> [service]: where a generated file goes.
 out() {
   if [[ -n "$STAGE" ]]; then
-    mkdir -p "$STAGE"; echo "$STAGE/$1-$2.yaml"
+    echo "$STAGE/$1-$2${3:+-$3}.yaml"
+  elif [[ "$1" == teams ]]; then
+    mkdir -p "argocd/apps-$2/projects"; echo "argocd/apps-$2/projects/teams.yaml"
   else
-    local dir="argocd/apps-$2/appsets"; [[ "$1" == teams ]] && dir="argocd/apps-$2/projects"
-    mkdir -p "$dir"; echo "$dir/$1.yaml"
+    mkdir -p "argocd/apps-$2/appsets/$1"; echo "argocd/apps-$2/appsets/$1/$3.yaml"
   fi
 }
 
-# Both ApplicationSets start from the same first generator: the services this
-# cluster subscribes to. Written once here, indented to fit under
+# Remove what the last run wrote. Only this script's own files: the add-ons
+# set and anything else under argocd/ are left alone.
+if [[ -n "$STAGE" ]]; then
+  mkdir -p "$STAGE"
+  rm -f "$STAGE"/services-*.yaml "$STAGE"/data-*.yaml "$STAGE"/teams-*.yaml
+else
+  for c in $(yq '.clusters[].name' "$REGISTRY"); do
+    rm -f "argocd/apps-$c/appsets/services/"*.yaml "argocd/apps-$c/appsets/data/"*.yaml
+  done
+fi
+
+# Both of a service's ApplicationSets start from the same first generator: its
+# one subscription file. Written once here, indented to fit under
 # `matrix.generators`. The merge generator lays a platform override on top of
-# each subscription; if your ArgoCD does not accept the nesting, set
+# the subscription; if your ArgoCD does not accept the nesting, set
 # `useMerge: false` in the registry and the plain subscription generator is
 # used instead (Appendix I).
 USE_MERGE="$(yq '.useMerge' "$REGISTRY")"
-services_generator() { # <cluster>
+services_generator() { # <cluster> <subscription file name>
   if [[ "$USE_MERGE" == "false" ]]; then
     cat <<EOF
-          # 1. The services this cluster subscribes to.
+          # 1. This service's subscription on this cluster.
           - git:
               repoURL: $URL
               revision: HEAD
               files:
-                - path: platform/subscriptions/$1/*.yaml
+                - path: platform/subscriptions/$1/$2
 EOF
     return 0
   fi
   cat <<EOF
-          # 1. The services this cluster subscribes to. The merge generator
-          #    takes each subscription as it is and lays the platform's optional
-          #    override for the same name on top.
+          # 1. This service's subscription on this cluster. The merge generator
+          #    takes the subscription as it is and lays the platform's optional
+          #    override for the same name on top. It reads every override on the
+          #    cluster, which is harmless: only the one whose name matches is
+          #    used, and the overrides live in this repository, which every set
+          #    depends on anyway.
           - merge:
               mergeKeys: [name]
               generators:
@@ -67,7 +92,7 @@ EOF
                     # they cannot collide with the .path of the second generator.
                     pathParamPrefix: subscription
                     files:
-                      - path: platform/subscriptions/$1/*.yaml
+                      - path: platform/subscriptions/$1/$2
                 - git:
                     repoURL: $URL
                     revision: HEAD
@@ -80,10 +105,14 @@ EOF
 for c in $(yq '.clusters[].name' "$REGISTRY"); do
   sfx=""; [[ "$c" == eks ]] && sfx="-eks"
 
-  cat > "$(out services "$c")" <<EOF
-# One Application per service per environment on the $c cluster.
+  for sub in "$SUBSCRIPTIONS/$c"/*.yaml; do
+    [[ -f "$sub" ]] || continue
+    svc="$(yq '.name' "$sub")"; file="$(basename "$sub")"
+
+    cat > "$(out services "$c" "$svc")" <<EOF
+# One Application per environment of $svc on the $c cluster.
 #
-# Which services: platform/subscriptions/$c/*.yaml in this repository.
+# Which service: platform/subscriptions/$c/$file in this repository.
 # Which environments: every <env>/env.yaml under $c/ in the service's own
 # config repository. The team adds an environment by adding a directory; no
 # change here is needed, though its namespace must exist (Terraform creates
@@ -91,8 +120,11 @@ for c in $(yq '.clusters[].name' "$REGISTRY"); do
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: services-$c
+  name: services-$c-$svc
   namespace: argocd
+  labels:
+    platform/kind: services
+    platform/service: $svc
 spec:
   # Go templates, with an error on any missing key instead of a silent blank.
   goTemplate: true
@@ -100,10 +132,10 @@ spec:
   generators:
     - matrix:
         generators:
-$(services_generator "$c")
-          # 2. For each of those, the environments in its config repository.
-          #    The second generator may use the first one's values: the
-          #    repository to read is the subscription's configRepo.
+$(services_generator "$c" "$file")
+          # 2. The environments in the service's config repository. The second
+          #    generator may use the first one's values: the repository to read
+          #    is the subscription's configRepo.
           - git:
               repoURL: '{{ .configRepo }}'
               revision: '{{ get . "targetRevision" | default "HEAD" }}'
@@ -142,20 +174,30 @@ $(services_generator "$c")
             maxDuration: 2m
 EOF
 
-  cat > "$(out data "$c")" <<EOF
-# Datastores on the $c cluster. Same discovery as the services, but with every
-# protection the hand-written postgres Applications had: no prune, no cascading
-# delete, and the Application survives the directory being removed.
+    cat > "$(out data "$c" "$svc")" <<EOF
+# Datastores of $svc on the $c cluster. Same discovery as its services set, but
+# with every protection the hand-written postgres Applications had: no prune, no
+# cascading delete, and the Application survives the directory being removed.
+# A service with no datastore gets this set too; it generates nothing.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: data-$c
+  name: data-$c-$svc
   namespace: argocd
+  labels:
+    platform/kind: data
+    platform/service: $svc
+  annotations:
+    # root prunes whatever is removed from argocd/, and pruning this set would
+    # delete the database's Application with it. This keeps the set until a
+    # person deletes it, so unsubscribing a service never takes its database's
+    # Application along. root shows OutOfSync until then, which is the reminder.
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
-  # If a postgres directory or a whole subscription disappears from Git, leave
-  # the Application and everything it deployed alone. Losing a database to a bad
+  # If a postgres directory or the subscription disappears from Git, leave the
+  # Application and everything it deployed alone. Losing a database to a bad
   # merge is not a mistake Git history can undo.
   syncPolicy:
     preserveResourcesOnDeletion: true
@@ -163,8 +205,8 @@ spec:
   generators:
     - matrix:
         generators:
-$(services_generator "$c")
-          # 2. Datastore directories in that service's config repository.
+$(services_generator "$c" "$file")
+          # 2. Datastore directories in the service's config repository.
           - git:
               repoURL: '{{ .configRepo }}'
               revision: '{{ get . "targetRevision" | default "HEAD" }}'
@@ -172,7 +214,8 @@ $(services_generator "$c")
                 # To add another kind of datastore, add a line here. Each one
                 # needs this ApplicationSet's policy. Two services must not both
                 # ship a datastore with the same directory name in one
-                # environment: the Application names would collide.
+                # environment: the Application names would collide. One owner
+                # per database (guide 4, Task 20.1.2).
                 - path: '$c/*/postgres'
   template:
     metadata:
@@ -208,6 +251,7 @@ $(services_generator "$c")
           jsonPointers:
             - /spec/volumeClaimTemplates
 EOF
+  done
 
   cat > "$(out teams "$c")" <<EOF
 # What team-owned repositories are allowed to do on the $c cluster. Every

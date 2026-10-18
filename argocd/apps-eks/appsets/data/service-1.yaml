@@ -1,16 +1,26 @@
-# Datastores on the local cluster. Same discovery as the services, but with every
-# protection the hand-written postgres Applications had: no prune, no cascading
-# delete, and the Application survives the directory being removed.
+# Datastores of service-1 on the eks cluster. Same discovery as its services set, but
+# with every protection the hand-written postgres Applications had: no prune, no
+# cascading delete, and the Application survives the directory being removed.
+# A service with no datastore gets this set too; it generates nothing.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: data-local
+  name: data-eks-service-1
   namespace: argocd
+  labels:
+    platform/kind: data
+    platform/service: service-1
+  annotations:
+    # root prunes whatever is removed from argocd/, and pruning this set would
+    # delete the database's Application with it. This keeps the set until a
+    # person deletes it, so unsubscribing a service never takes its database's
+    # Application along. root shows OutOfSync until then, which is the reminder.
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
-  # If a postgres directory or a whole subscription disappears from Git, leave
-  # the Application and everything it deployed alone. Losing a database to a bad
+  # If a postgres directory or the subscription disappears from Git, leave the
+  # Application and everything it deployed alone. Losing a database to a bad
   # merge is not a mistake Git history can undo.
   syncPolicy:
     preserveResourcesOnDeletion: true
@@ -18,9 +28,12 @@ spec:
   generators:
     - matrix:
         generators:
-          # 1. The services this cluster subscribes to. The merge generator
-          #    takes each subscription as it is and lays the platform's optional
-          #    override for the same name on top.
+          # 1. This service's subscription on this cluster. The merge generator
+          #    takes the subscription as it is and lays the platform's optional
+          #    override for the same name on top. It reads every override on the
+          #    cluster, which is harmless: only the one whose name matches is
+          #    used, and the overrides live in this repository, which every set
+          #    depends on anyway.
           - merge:
               mergeKeys: [name]
               generators:
@@ -31,14 +44,14 @@ spec:
                     # they cannot collide with the .path of the second generator.
                     pathParamPrefix: subscription
                     files:
-                      - path: platform/subscriptions/local/*.yaml
+                      - path: platform/subscriptions/eks/service-1.yaml
                 - git:
                     repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
                     revision: HEAD
                     pathParamPrefix: override
                     files:
-                      - path: platform/overrides/local/*.yaml
-          # 2. Datastore directories in that service's config repository.
+                      - path: platform/overrides/eks/*.yaml
+          # 2. Datastore directories in the service's config repository.
           - git:
               repoURL: '{{ .configRepo }}'
               revision: '{{ get . "targetRevision" | default "HEAD" }}'
@@ -46,12 +59,13 @@ spec:
                 # To add another kind of datastore, add a line here. Each one
                 # needs this ApplicationSet's policy. Two services must not both
                 # ship a datastore with the same directory name in one
-                # environment: the Application names would collide.
-                - path: 'local/*/postgres'
+                # environment: the Application names would collide. One owner
+                # per database (guide 4, Task 20.1.2).
+                - path: 'eks/*/postgres'
   template:
     metadata:
-      # path.segments is [local, <environment>, postgres].
-      name: '{{ .path.basename }}-{{ index .path.segments 1 }}'
+      # path.segments is [eks, <environment>, postgres].
+      name: '{{ .path.basename }}-{{ index .path.segments 1 }}-eks'
       # No finalizer: deleting this Application must not delete the database.
     spec:
       project: teams

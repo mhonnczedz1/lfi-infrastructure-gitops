@@ -1,15 +1,18 @@
-# One Application per service per environment on the eks cluster.
+# One Application per environment of service-1 on the local cluster.
 #
-# Which services: platform/subscriptions/eks/*.yaml in this repository.
-# Which environments: every <env>/env.yaml under eks/ in the service's own
+# Which service: platform/subscriptions/local/service-1.yaml in this repository.
+# Which environments: every <env>/env.yaml under local/ in the service's own
 # config repository. The team adds an environment by adding a directory; no
 # change here is needed, though its namespace must exist (Terraform creates
 # <prefix>-<env> for each name in its environments variable).
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: services-eks
+  name: services-local-service-1
   namespace: argocd
+  labels:
+    platform/kind: services
+    platform/service: service-1
 spec:
   # Go templates, with an error on any missing key instead of a silent blank.
   goTemplate: true
@@ -17,9 +20,12 @@ spec:
   generators:
     - matrix:
         generators:
-          # 1. The services this cluster subscribes to. The merge generator
-          #    takes each subscription as it is and lays the platform's optional
-          #    override for the same name on top.
+          # 1. This service's subscription on this cluster. The merge generator
+          #    takes the subscription as it is and lays the platform's optional
+          #    override for the same name on top. It reads every override on the
+          #    cluster, which is harmless: only the one whose name matches is
+          #    used, and the overrides live in this repository, which every set
+          #    depends on anyway.
           - merge:
               mergeKeys: [name]
               generators:
@@ -30,26 +36,26 @@ spec:
                     # they cannot collide with the .path of the second generator.
                     pathParamPrefix: subscription
                     files:
-                      - path: platform/subscriptions/eks/*.yaml
+                      - path: platform/subscriptions/local/service-1.yaml
                 - git:
                     repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
                     revision: HEAD
                     pathParamPrefix: override
                     files:
-                      - path: platform/overrides/eks/*.yaml
-          # 2. For each of those, the environments in its config repository.
-          #    The second generator may use the first one's values: the
-          #    repository to read is the subscription's configRepo.
+                      - path: platform/overrides/local/*.yaml
+          # 2. The environments in the service's config repository. The second
+          #    generator may use the first one's values: the repository to read
+          #    is the subscription's configRepo.
           - git:
               repoURL: '{{ .configRepo }}'
               revision: '{{ get . "targetRevision" | default "HEAD" }}'
               files:
-                - path: 'eks/*/env.yaml'
+                - path: 'local/*/env.yaml'
   template:
     metadata:
       # Same names as the hand-written Applications this replaces, which is what
       # lets the new Application adopt what is already running.
-      name: '{{ .name }}-{{ .env }}-eks'
+      name: '{{ .name }}-{{ .env }}'
       finalizers:
         - resources-finalizer.argocd.argoproj.io
     spec:

@@ -1,0 +1,97 @@
+# Datastores of service-2 on the eks cluster. Same discovery as its services set, but
+# with every protection the hand-written postgres Applications had: no prune, no
+# cascading delete, and the Application survives the directory being removed.
+# A service with no datastore gets this set too; it generates nothing.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: data-eks-service-2
+  namespace: argocd
+  labels:
+    platform/kind: data
+    platform/service: service-2
+  annotations:
+    # root prunes whatever is removed from argocd/, and pruning this set would
+    # delete the database's Application with it. This keeps the set until a
+    # person deletes it, so unsubscribing a service never takes its database's
+    # Application along. root shows OutOfSync until then, which is the reminder.
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  # If a postgres directory or the subscription disappears from Git, leave the
+  # Application and everything it deployed alone. Losing a database to a bad
+  # merge is not a mistake Git history can undo.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+    applicationsSync: create-update
+  generators:
+    - matrix:
+        generators:
+          # 1. This service's subscription on this cluster. The merge generator
+          #    takes the subscription as it is and lays the platform's optional
+          #    override for the same name on top. It reads every override on the
+          #    cluster, which is harmless: only the one whose name matches is
+          #    used, and the overrides live in this repository, which every set
+          #    depends on anyway.
+          - merge:
+              mergeKeys: [name]
+              generators:
+                - git:
+                    repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
+                    revision: HEAD
+                    # Keeps this generator's path values under .subscription, so
+                    # they cannot collide with the .path of the second generator.
+                    pathParamPrefix: subscription
+                    files:
+                      - path: platform/subscriptions/eks/service-2.yaml
+                - git:
+                    repoURL: https://github.com/mhonnczedz1/lfi-infrastructure-gitops.git
+                    revision: HEAD
+                    pathParamPrefix: override
+                    files:
+                      - path: platform/overrides/eks/*.yaml
+          # 2. Datastore directories in the service's config repository.
+          - git:
+              repoURL: '{{ .configRepo }}'
+              revision: '{{ get . "targetRevision" | default "HEAD" }}'
+              directories:
+                # To add another kind of datastore, add a line here. Each one
+                # needs this ApplicationSet's policy. Two services must not both
+                # ship a datastore with the same directory name in one
+                # environment: the Application names would collide. One owner
+                # per database (guide 4, Task 20.1.2).
+                - path: 'eks/*/postgres'
+  template:
+    metadata:
+      # path.segments is [eks, <environment>, postgres].
+      name: '{{ .path.basename }}-{{ index .path.segments 1 }}-eks'
+      # No finalizer: deleting this Application must not delete the database.
+    spec:
+      project: teams
+      source:
+        repoURL: '{{ .configRepo }}'
+        targetRevision: '{{ get . "targetRevision" | default "HEAD" }}'
+        path: '{{ .path.path }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'platform-{{ index .path.segments 1 }}'
+      syncPolicy:
+        automated:
+          # false: a file removed from Git must not delete the StatefulSet.
+          prune: false
+          selfHeal: true
+        retry:
+          limit: 3
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 2m
+      ignoreDifferences:
+        # volumeClaimTemplates are immutable after creation and the API server
+        # returns them with defaulted fields, which ArgoCD reads as permanent
+        # drift. Without this the app sits OutOfSync forever.
+        - group: apps
+          kind: StatefulSet
+          jsonPointers:
+            - /spec/volumeClaimTemplates
