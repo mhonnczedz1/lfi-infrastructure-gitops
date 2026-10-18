@@ -18,13 +18,13 @@ source "$SCRIPT_DIR/lib.sh"
 
 ACTION="${1:-${ACTION:-}}"
 SVC="${2:-${SVC:-}}"
-NAMESPACE="${NAMESPACE:-platform-prod}"
+NAMESPACE="${NAMESPACE:-${NAMESPACE_PREFIX}-prod}"
 PICKED_BY_MENU=0
 
 # --- 1. What do you want to do? ---------------------------------------------
 if [[ -z "$ACTION" ]]; then
   is_tty || usage_error "ACTION is required (watch, promote or abort)." \
-    "gmake canary ACTION=promote CLUSTER=local SVC=service-2"
+    "gmake canary ACTION=promote CLUSTER=local SVC=${LFI_SERVICES[0]}"
   echo
   echo "What do you want to do with a prod canary?"
   echo "  1) watch     follow a rollout live. Changes nothing."
@@ -87,8 +87,8 @@ describe() { # <service>
 
 # --- 3. Which service? Show what each one is doing first. ---------------------
 if [[ -z "$SVC" ]]; then
-  is_tty || usage_error "SVC is required (service-1 or service-2)." \
-    "gmake canary ACTION=${ACTION} CLUSTER=${CLUSTER_NAME} SVC=service-2"
+  is_tty || usage_error "SVC is required (one of: ${LFI_SERVICES[*]})." \
+    "gmake canary ACTION=${ACTION} CLUSTER=${CLUSTER_NAME} SVC=${LFI_SERVICES[0]}"
   echo
   echo "Which service on ${CLUSTER_NAME}?"
   i=1
@@ -102,9 +102,9 @@ if [[ -z "$SVC" ]]; then
   if [[ ${#IN_FLIGHT[@]} -eq 1 ]]; then
     DEFAULT="${IN_FLIGHT[0]}"
   elif [[ ${#IN_FLIGHT[@]} -gt 1 && "$ACTION" == "promote" ]]; then
-    DEFAULT="service-2"
+    DEFAULT="$(first_to_promote "${IN_FLIGHT[@]}")"
     echo
-    echo "  Both are rolling out. service-2 goes first: service-1 calls it."
+    echo "  Several are rolling out. ${DEFAULT} goes first$(called_by_note "$DEFAULT")."
   fi
   if [[ ${#IN_FLIGHT[@]} -eq 0 && "$ACTION" != "status" ]]; then
     echo
@@ -122,7 +122,7 @@ if [[ -z "$SVC" ]]; then
   PICKED_BY_MENU=1
 fi
 
-[[ " ${LFI_SERVICES[*]} " == *" $SVC "* ]] || usage_error "SVC must be service-1 or service-2 (got '${SVC}')."
+[[ " ${LFI_SERVICES[*]} " == *" $SVC "* ]] || usage_error "SVC must be one of: ${LFI_SERVICES[*]} (got '${SVC}')."
 
 # --- 4. Confirm, when a menu chose for you and the action changes traffic. ----
 if [[ "$PICKED_BY_MENU" -eq 1 && "$ACTION" != "status" && "${ASSUME_YES:-}" != "1" ]]; then
@@ -150,7 +150,8 @@ case "$ACTION" in
   promote)
     kubectl argo rollouts promote "$SVC" -n "$NAMESPACE" --context "$CONTEXT"
     STEPS=("gmake canary          choose 'watch' to follow it finish" "gmake status          check every build at once")
-    [[ "$SVC" == "service-2" ]] && STEPS=("gmake canary          now promote service-1 if it is in this release" "${STEPS[@]}")
+    DEPENDENTS="$(service_dependents "$SVC" | tr '\n' ' ')"
+    [[ -n "$DEPENDENTS" ]] && STEPS=("gmake canary          now promote ${DEPENDENTS}if it is in this release" "${STEPS[@]}")
     next_steps "${STEPS[@]}"
     ;;
   abort)
