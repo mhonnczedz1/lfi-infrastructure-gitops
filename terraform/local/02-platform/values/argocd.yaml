@@ -9,22 +9,14 @@ dex:
 notifications:
   enabled: false
 
-# Templated generation of Applications across many clusters.
-# The app-of-apps pattern in Phase 6.2 covers this project's needs.
+# Templated generation of Applications from Git. This platform uses it: the
+# ApplicationSets under argocd/apps-<cluster>/appsets/ create every service,
+# datastore and add-on Application from the directory tree.
 #
-# WARNING: this key does nothing. The argo-cd chart has no
-# `applicationSet.enabled` value, in 7.x or in 10.x, and its deployment
-# template carries no conditional. Helm ignores unrecognised values silently,
-# so the ApplicationSet controller IS deployed regardless of what you write
-# here. It is kept only to document the intent.
-#
-# To actually remove it, set the replica count to zero instead:
-#   applicationSet:
-#     replicas: 0
-# Budget roughly 50-100 MB if you leave it running, which is what the resource
-# figures below assume.
-applicationSet:
-  enabled: false
+# The argo-cd chart has no `applicationSet.enabled` value (in 7.x or 10.x), so
+# the key that used to sit here did nothing and the controller ran regardless.
+# It is removed rather than left to mislead. Budget roughly 50-100 MB for the
+# controller, which the resource figures below already assume.
 
 configs:
   params:
