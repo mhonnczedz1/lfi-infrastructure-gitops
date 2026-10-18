@@ -68,8 +68,12 @@ recent_tags() { # <service> [count]
 recent_releases() { # [count]
   # --no-merges: a merge commit's body repeats the PR title, which would list
   # "Merge pull request ..." lines. Only the release commits themselves count.
+  # The name is the subject without the partial-release scope (" [local / ...]")
+  # or the " (#12)" that a squash merge appends.
   cfg_git log main --no-merges --format='%s' -n 200 \
-    | grep '^release(' | sed 's/^release([a-z0-9-]*): //' | awk '!seen[$0]++' | head -n "${1:-5}"
+    | grep '^release(' \
+    | sed -e 's/^release([a-z0-9-]*): //' -e 's/ (#[0-9]*)$//' -e 's/ \[.*$//' \
+    | awk '!seen[$0]++' | head -n "${1:-5}"
 }
 
 usage() {
@@ -160,7 +164,7 @@ elif [[ "$TO" =~ ^[0-9]{4}-W[0-9]{2}(-B[0-9]+)?(-[0-9]+)?$ ]]; then
   # A release name can match more than one commit: this repo has reused a
   # release branch within a week. Take the newest, which is the week's final
   # state, and say so.
-  MATCHES="$(cfg_git log main --no-merges --format=%h --grep="^release([a-z0-9-]*): ${TO}\$")"
+  MATCHES="$(cfg_git log main --no-merges -E --format=%h --grep="^release\([a-z0-9-]*\): ${TO}( \[[^]]*\])?( \(#[0-9]+\))?\$")"
   COUNT="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
   if [[ "$COUNT" -eq 0 ]]; then
     usage "no release named '$TO'."
