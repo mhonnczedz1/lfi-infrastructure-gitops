@@ -1,92 +1,109 @@
 #!/usr/bin/env bash
-# Opens the weekly prod release PR.
+# Opens the weekly prod release PRs, one per service, each in that service's
+# config repository.
 #
 # Usage: scripts/release.sh
-#   Asks which cluster to release to (local, eks, or both) and which service
-#   (service-1, service-2, or both). Name them up front and nothing is asked:
-#     gmake release CLUSTER=eks SVC=service-1
+#   Asks which cluster (local, eks, or both) and which service (or both, meaning
+#   every released service). Name them up front and nothing is asked:
+#     gmake release CLUSTER=eks SVC=team-1-service-1
+#   DRY_RUN=1 shows what would be released and stops, touching nothing.
 #   Clusters are allowed to drift apart: releasing to one leaves the other where
 #   it was, until you release to it.
 #
-# Reads the image tags the dev overlay is currently running and writes them
-# into the prod overlay. Nothing is built: the images already exist in GHCR and
+# Reads the image tag the "from" environment (dev, unless the service's
+# subscription says otherwise) is running and writes it into the "to"
+# environment (prod). Nothing is built: the images already exist in GHCR and
 # have been serving dev traffic all week. This script only moves a reference.
+#
+# Each service's manifests live in its team's config repository, at its
+# repoPath, so a release is one PR per service in that repository, and the
+# team's review rules (its CODEOWNERS) gate prod. The deny list is the team's
+# too: <repoPath>/denied-builds.yaml beside the service's environments.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 source "$SCRIPT_DIR/lib.sh"
 
-# Each cluster has its own overlay tree, named after it: overlays/local, overlays/eks.
 pick_cluster "release to" yes
 pick_service "release" yes
 TREES=("${PICKED_CLUSTERS[@]}")
 SERVICES=("${PICKED_SERVICES[@]}")
 show_equivalent "gmake release"
 
-# A partial release says so in the title, so two PRs for different clusters in the
-# same week are easy to tell apart.
 SCOPE="${TREES[*]} / ${SERVICES[*]}"
 PARTIAL=0
-[[ ${#TREES[@]} -lt ${#LFI_CLUSTERS[@]} || ${#SERVICES[@]} -lt ${#LFI_SERVICES[@]} ]] && PARTIAL=1
+[[ ${#TREES[@]} -lt ${#LFI_CLUSTERS[@]} || ${#SERVICES[@]} -lt ${#LFI_RELEASABLE[@]} ]] && PARTIAL=1
 # %G is the ISO week-numbering year, not the calendar year. They diverge at
 # New Year: 2027-01-01 falls in ISO week 53 of 2026, so %Y-W%V would name that
 # release 2027-W53, a week that does not exist. UTC to match CI.
-WEEK="$(date -u +%G-W%V)"     # ISO week, so release/2026-W36
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "$REPO_ROOT"
+WEEK="$(date -u +%G-W%V)"
 
-# Refuse to run from a dirty tree. A release commit that quietly carries an
-# unrelated working change is exactly the kind of surprise this whole process
-# exists to prevent.
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: working tree is dirty. Commit or stash first." >&2
-  exit 1
-fi
+# Every config repo that takes part must be a clean checkout on an up-to-date
+# main, for the reason a release commit must never carry an unrelated change.
+# Several services may share one repository; each is checked once.
+for cfg in $(for svc in "${SERVICES[@]}"; do service_config_dir "$svc"; done | sort -u); do
+  [[ -d "$cfg/.git" ]] || { echo "ERROR: config repo not checked out at $cfg." >&2; exit 1; }
+  if [[ -n "$(git -C "$cfg" status --porcelain)" ]]; then
+    echo "ERROR: $cfg has uncommitted changes. Commit or stash first." >&2
+    exit 1
+  fi
+  git -C "$cfg" switch main >/dev/null 2>&1
+  git -C "$cfg" pull --ff-only --quiet
+done
 
-git switch main >/dev/null 2>&1
-git pull --ff-only
+# Each service's own deny list. A release without one is refused: the file
+# being missing is not the same thing as nothing being denied.
+for svc in "${SERVICES[@]}"; do
+  [[ -f "$(service_dir "$svc")/denied-builds.yaml" ]] || {
+    echo "ERROR: $(service_dir "$svc")/denied-builds.yaml is missing. Refusing to release $svc without it." >&2
+    exit 1
+  }
+done
 
-DENYLIST="releases/denied-builds.yaml"
-if [[ ! -f "$DENYLIST" ]]; then
-  echo "ERROR: ${DENYLIST} is missing. Refusing to release without it." >&2
-  exit 1
-fi
+tag_in() { yq '.images[0].newTag // ""' "$1"; } # <file>
 
 # Collect what would change, before changing anything, so the script can decide
-# whether there is a release to make and can build the PR body.
-declare -a CHANGES=()
-declare -a BLOCKED=()
-for tree in "${TREES[@]}"; do
-  for svc in "${SERVICES[@]}"; do
-    dev_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-      "kubernetes/overlays/$tree/dev/$svc/kustomization.yaml")"
-    prod_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-      "kubernetes/overlays/$tree/prod/$svc/kustomization.yaml")"
-
-    [[ "$dev_tag" == "$prod_tag" ]] && continue
+# whether there is a release to make and can build the PR bodies.
+declare -a CHANGES=()    # svc|cluster|from|to
+declare -a BLOCKED=()    # svc|cluster|tag|reason
+for svc in "${SERVICES[@]}"; do
+  dir="$(service_dir "$svc")"
+  from_env="$(promote_from "$svc")"; to_env="$(promote_to "$svc")"
+  for tree in "${TREES[@]}"; do
+    if ! service_on_cluster "$svc" "$tree"; then
+      echo "NOTE: $svc is not subscribed on $tree. Skipped." >&2
+      continue
+    fi
+    src="$dir/$tree/$from_env/kustomization.yaml"
+    dst="$dir/$tree/$to_env/kustomization.yaml"
+    if [[ ! -f "$src" || ! -f "$dst" ]]; then
+      echo "NOTE: $svc has no $from_env and $to_env on $tree. Skipped." >&2
+      continue
+    fi
+    dev_tag="$(tag_in "$src")"
+    prod_tag="$(tag_in "$dst")"
+    [[ -n "$dev_tag" && "$dev_tag" != "$prod_tag" ]] || continue
 
     # A denied build drops out of the release. It is never silently replaced
     # with an older one: shipping something other than what you asked for is
     # exactly the surprise this whole process exists to prevent. strenv reads
-    # the values as strings so a numeric-looking tag is not coerced.
-    reason="$(SVC="$svc" TAG="$dev_tag" yq '
-      .denied[] | select(.service == strenv(SVC) and .build == strenv(TAG)) | .reason
-    ' "$DENYLIST")"
+    # the value as a string so a numeric-looking tag is not coerced.
+    reason="$(TAG="$dev_tag" yq '.denied[]? | select(.build == strenv(TAG)) | .reason' "$dir/denied-builds.yaml")"
 
     if [[ -n "$reason" ]]; then
-      BLOCKED+=("$tree|$svc|$dev_tag|$reason")
+      BLOCKED+=("$svc|$tree|$dev_tag|$reason")
       continue
     fi
-
-    CHANGES+=("$tree|$svc|$prod_tag|$dev_tag")
+    CHANGES+=("$svc|$tree|$prod_tag|$dev_tag")
   done
 done
 
 if [[ ${#BLOCKED[@]} -gt 0 ]]; then
   echo "Denied builds, excluded from this release:" >&2
   for blocked in "${BLOCKED[@]}"; do
-    IFS='|' read -r tree svc tag reason <<< "$blocked"
-    printf '  %-18s %-10s %s\n' "$tree/$svc" "$tag" "$reason" >&2
+    IFS='|' read -r svc tree tag reason <<< "$blocked"
+    printf '  %-28s %-10s %s\n' "$tree/$svc" "$tag" "$reason" >&2
   done
 fi
 
@@ -104,72 +121,107 @@ if [[ ${#CHANGES[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Name the branch after the newest build in this release, so each release says
-# what it contains: release/2026-W40-B3. Tags look like 26W40B3, so the build
-# ordinal is whatever follows the B. The last |-field of a change is the dev
-# tag whatever else the record carries. A tag that does not parse (a SHA, say)
-# is ignored, and a release with no parsable tag falls back to release/2026-W40.
-BUILD_N=0
-for change in "${CHANGES[@]}"; do
-  tag="${change##*|}"
-  if [[ "$tag" =~ ^[0-9]{2}W[0-9]{2}B([0-9]+)$ ]]; then
-    ordinal=$((10#${BASH_REMATCH[1]}))
-    (( ordinal > BUILD_N )) && BUILD_N=$ordinal
-  fi
-done
-BASE_BRANCH="release/${WEEK}"
-(( BUILD_N > 0 )) && BASE_BRANCH+="-B${BUILD_N}"
-
-# The branch from an earlier release still exists locally and on the remote.
-# That is only a collision here if a re-release has the same newest build, which
-# is unusual but possible, so fall back to a -2, -3 suffix. The remote check
-# matters: a free local name that exists on origin would build the release
-# commit and then fail at the push.
-git fetch --quiet --prune origin
-BRANCH="$BASE_BRANCH"
-n=2
-while git show-ref --verify --quiet "refs/heads/${BRANCH}" \
-   || git show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; do
-  BRANCH="${BASE_BRANCH}-${n}"
-  n=$((n + 1))
-done
-# What the commit and PR are called, for example 2026-W40-B3.
-RELEASE_ID="${BRANCH#release/}"
-TITLE="release(prod): ${RELEASE_ID}"
-[[ "$PARTIAL" -eq 1 ]] && TITLE+=" [${SCOPE}]"
-
-git switch -c "$BRANCH"
-
-# Write the new tags. This is the entire mechanical content of a release.
-BODY="## Release ${RELEASE_ID}"$'\n\n'"Scope: ${SCOPE}"$'\n\n'"| Tree / service | From | To |"$'\n'"|---|---|---|"$'\n'
-for change in "${CHANGES[@]}"; do
-  IFS='|' read -r tree svc from to <<< "$change"
-  yq -i '(.images[] | select(.name == "'"$svc"'") | .newTag) = "'"$to"'"' \
-    "kubernetes/overlays/$tree/prod/$svc/kustomization.yaml"
-  BODY+="| \`$tree/$svc\` | \`${from:0:12}\` | \`${to:0:12}\` |"$'\n'
-done
-
-BODY+=$'\n'"Promote **service-2 before service-1**: service-1 calls service-2, so"
-BODY+=" promoting the dependency first keeps each canary judgment about one change."
-
-# Reviewers need to see what is NOT in the release as much as what is.
-if [[ ${#BLOCKED[@]} -gt 0 ]]; then
-  BODY+=$'\n\n'"### Excluded by the deny list"$'\n\n'"| Tree / service | Build | Reason |"$'\n'"|---|---|---|"$'\n'
-  for blocked in "${BLOCKED[@]}"; do
-    IFS='|' read -r tree svc tag reason <<< "$blocked"
-    BODY+="| \`$tree/$svc\` | \`$tag\` | $reason |"$'\n'
+# DRY_RUN=1 shows what would be released and stops, touching nothing.
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  echo "Would release (dry run, nothing changed):"
+  for change in "${CHANGES[@]}"; do
+    IFS='|' read -r svc tree from to <<< "$change"
+    printf '  %-20s %-6s %s -> %s\n' "$svc" "$tree" "$from" "$to"
   done
+  exit 0
 fi
 
-git add kubernetes/overlays/local/prod kubernetes/overlays/eks/prod
-git commit -m "$TITLE"
-git push -u origin "$BRANCH"
+# One pass per service that has something to ship.
+PRS=()
+for svc in "${SERVICES[@]}"; do
+  cfg="$(service_config_dir "$svc")"
+  prefix="$(service_prefix "$svc")"
+  to_env="$(promote_to "$svc")"
 
-gh pr create --title "$TITLE" --body "$BODY" --base main
+  # This service's changes only.
+  MINE=()
+  for change in "${CHANGES[@]}"; do
+    [[ "${change%%|*}" == "$svc" ]] && MINE+=("$change")
+  done
+  [[ ${#MINE[@]} -gt 0 ]] || continue
 
-git switch main
-echo "PR opened. Review the diff: it is your release note."
-next_steps "merge the PR           ArgoCD then starts a canary that pauses at 50 percent." \
+  # Name the release after the newest build in it, so each release says what it
+  # contains: 2026-W40-B3. Tags look like 26W40B3, so the build ordinal is
+  # whatever follows the B. A tag that does not parse (a SHA, say) is ignored,
+  # and a release with no parsable tag falls back to 2026-W40.
+  BUILD_N=0
+  for change in "${MINE[@]}"; do
+    tag="${change##*|}"
+    if [[ "$tag" =~ ^[0-9]{2}W[0-9]{2}B([0-9]+)$ ]]; then
+      ordinal=$((10#${BASH_REMATCH[1]}))
+      (( ordinal > BUILD_N )) && BUILD_N=$ordinal
+    fi
+  done
+  RELEASE_ID="${WEEK}"
+  (( BUILD_N > 0 )) && RELEASE_ID+="-B${BUILD_N}"
+
+  # The branch carries the service, because several services may share this
+  # repository and each gets its own PR. An earlier release's branch may still
+  # exist locally or on the remote: fall back to a -2, -3 suffix. The remote
+  # check matters: a free local name that exists on origin would build the
+  # release commit and fail at the push.
+  git -C "$cfg" fetch --quiet --prune origin
+  BASE_BRANCH="release/${svc}/${RELEASE_ID}"
+  BRANCH="$BASE_BRANCH"
+  n=2
+  while git -C "$cfg" show-ref --verify --quiet "refs/heads/${BRANCH}" \
+     || git -C "$cfg" show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; do
+    BRANCH="${BASE_BRANCH}-${n}"
+    n=$((n + 1))
+  done
+  RELEASE_ID="${BRANCH#"release/${svc}/"}"
+  # gmake rollback finds a release by this title: release(<env>): <service> <id>.
+  TITLE="release(${to_env}): ${svc} ${RELEASE_ID}"
+  [[ "$PARTIAL" -eq 1 ]] && TITLE+=" [${SCOPE}]"
+
+  git -C "$cfg" switch -q -c "$BRANCH"
+
+  # Write the new tags. This is the entire mechanical content of a release.
+  BODY="## Release ${RELEASE_ID}: ${svc}"$'\n\n'"Scope: ${SCOPE}"$'\n\n'"| Cluster | From | To |"$'\n'"|---|---|---|"$'\n'
+  for change in "${MINE[@]}"; do
+    IFS='|' read -r _ tree from to <<< "$change"
+    file="${prefix}$tree/$to_env/kustomization.yaml"
+    T="$to" yq -i '.images[0].newTag = strenv(T)' "$cfg/$file"
+    git -C "$cfg" add "$file"
+    BODY+="| \`$tree\` | \`${from:0:12}\` | \`${to:0:12}\` |"$'\n'
+  done
+
+  # Dependencies go first, so each canary judgment is about one change.
+  for dep in $(service_deps "$svc"); do
+    if [[ " ${SERVICES[*]} " == *" $dep "* ]]; then
+      BODY+=$'\n'"Promote **${dep} before ${svc}**: ${svc} calls ${dep}, so promoting the dependency"
+      BODY+=" first keeps each canary judgment about one change."
+    fi
+  done
+
+  # Reviewers need to see what is NOT in the release as much as what is.
+  MY_BLOCKED=()
+  for blocked in ${BLOCKED[@]+"${BLOCKED[@]}"}; do
+    [[ "${blocked%%|*}" == "$svc" ]] && MY_BLOCKED+=("$blocked")
+  done
+  if [[ ${#MY_BLOCKED[@]} -gt 0 ]]; then
+    BODY+=$'\n\n'"### Excluded by the deny list"$'\n\n'"| Cluster | Build | Reason |"$'\n'"|---|---|---|"$'\n'
+    for blocked in "${MY_BLOCKED[@]}"; do
+      IFS='|' read -r _ tree tag reason <<< "$blocked"
+      BODY+="| \`$tree\` | \`$tag\` | $reason |"$'\n'
+    done
+  fi
+
+  git -C "$cfg" commit -q -m "$TITLE"
+  git -C "$cfg" push -q -u origin "$BRANCH"
+  url="$(cd "$cfg" && gh pr create --title "$TITLE" --body "$BODY" --base main)"
+  git -C "$cfg" switch main >/dev/null 2>&1
+  PRS+=("$svc  $url")
+done
+
+echo "PRs opened. Review each diff: it is your release note."
+for pr in "${PRS[@]}"; do echo "  $pr"; done
+next_steps "merge the PRs          ArgoCD then starts a canary that pauses at 50 percent." \
            "gmake status           watch the new build arrive" \
-           "gmake canary           promote it. service-2 first: service-1 calls it." \
+           "gmake canary           promote it. Dependencies first, as the PR says." \
            "gmake rollback         go back to the last good build if it misbehaves"

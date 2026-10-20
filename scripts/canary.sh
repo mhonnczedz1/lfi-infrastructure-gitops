@@ -5,11 +5,15 @@
 #   Asks what you want to do, on which cluster, and for which service, showing
 #   each rollout's state before you choose. promote and abort then confirm.
 #   Name things up front and nothing is asked:
-#     gmake canary ACTION=promote CLUSTER=eks SVC=service-2
+#     gmake canary ACTION=promote CLUSTER=eks SVC=team-2-service-2
 #   Without a terminal, a missing answer is an error with a hint, never a prompt.
 #
 # These change no desired state, which is why they are commands rather than
 # commits. They advance or unwind a convergence toward what Git already says.
+#
+# "Prod" is each service's promotion target (promotion.to in its subscription).
+# The namespace and the Rollout's name are read from the Application ArgoCD made
+# for it, because both are the team's choice.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,13 +22,13 @@ source "$SCRIPT_DIR/lib.sh"
 
 ACTION="${1:-${ACTION:-}}"
 SVC="${2:-${SVC:-}}"
-NAMESPACE="${NAMESPACE:-platform-prod}"
 PICKED_BY_MENU=0
+EXAMPLE_SVC="$(first_to_promote ${LFI_RELEASABLE[@]+"${LFI_RELEASABLE[@]}"} 2>/dev/null || true)"
 
 # --- 1. What do you want to do? ---------------------------------------------
 if [[ -z "$ACTION" ]]; then
   is_tty || usage_error "ACTION is required (watch, promote or abort)." \
-    "gmake canary ACTION=promote CLUSTER=local SVC=service-2"
+    "gmake canary ACTION=promote CLUSTER=local SVC=${EXAMPLE_SVC}"
   echo
   echo "What do you want to do with a prod canary?"
   echo "  1) watch     follow a rollout live. Changes nothing."
@@ -53,15 +57,25 @@ CLUSTER_NAME="${PICKED_CLUSTERS[0]}"
 CONTEXT="$(cluster_context "$CLUSTER_NAME")"
 [[ -z "${CLUSTER:-}" ]] && PICKED_BY_MENU=1
 
+# The namespace and Rollout of a service's prod environment on this cluster.
+# Sets NS and RO; both empty if ArgoCD has no such Application.
+locate() { # <service>
+  NS=""; RO=""
+  read -r NS RO <<< "$(app_rollout "$CONTEXT" "$(app_name "$(promote_to "$1")" "$1")")" || true
+  NS="${NS:-}"; RO="${RO:-}"
+}
+
 # What each Rollout is doing on this cluster.
 rollout_fields() { # <service> -> "<stableRS> <currentPodHash> <phase>"
-  kubectl --context "$CONTEXT" -n "$NAMESPACE" get rollout "$1" \
+  locate "$1"
+  [[ -n "$RO" ]] || return 0
+  kubectl --context "$CONTEXT" -n "$NS" get rollout "$RO" \
     -o jsonpath='{.status.stableRS} {.status.currentPodHash} {.status.phase}{"\n"}' 2>/dev/null || true
 }
 rs_tag() { # <hash>
   [[ -n "$1" ]] || return 0
   local image
-  image="$(kubectl --context "$CONTEXT" -n "$NAMESPACE" get rs -l "rollouts-pod-template-hash=$1" \
+  image="$(kubectl --context "$CONTEXT" -n "$NS" get rs -l "rollouts-pod-template-hash=$1" \
     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)"
   echo "${image##*:}"
 }
@@ -73,8 +87,9 @@ DESC=""
 describe() { # <service>
   local stable current phase running canary
   read -r stable current phase <<< "$(rollout_fields "$1")" || true
+  locate "$1"
   stable="${stable:-}"; current="${current:-}"; phase="${phase:-}"
-  if [[ -z "$phase" ]]; then DESC="state unknown (cluster not reachable?)"; return; fi
+  if [[ -z "$phase" ]]; then DESC="state unknown (not on this cluster, or cluster not reachable?)"; return; fi
   running="$(rs_tag "$stable")"
   if [[ -n "$current" && "$current" != "$stable" ]]; then
     canary="$(rs_tag "$current")"
@@ -87,14 +102,14 @@ describe() { # <service>
 
 # --- 3. Which service? Show what each one is doing first. ---------------------
 if [[ -z "$SVC" ]]; then
-  is_tty || usage_error "SVC is required (service-1 or service-2)." \
-    "gmake canary ACTION=${ACTION} CLUSTER=${CLUSTER_NAME} SVC=service-2"
+  is_tty || usage_error "SVC is required (one of: ${LFI_RELEASABLE[*]})." \
+    "gmake canary ACTION=${ACTION} CLUSTER=${CLUSTER_NAME} SVC=${EXAMPLE_SVC}"
   echo
   echo "Which service on ${CLUSTER_NAME}?"
   i=1
-  for s in "${LFI_SERVICES[@]}"; do
+  for s in "${LFI_RELEASABLE[@]}"; do
     describe "$s"
-    printf '  %d) %-10s %s\n' "$i" "$s" "$DESC"
+    printf '  %d) %-24s %s\n' "$i" "$s" "$DESC"
     i=$((i + 1))
   done
 
@@ -102,9 +117,9 @@ if [[ -z "$SVC" ]]; then
   if [[ ${#IN_FLIGHT[@]} -eq 1 ]]; then
     DEFAULT="${IN_FLIGHT[0]}"
   elif [[ ${#IN_FLIGHT[@]} -gt 1 && "$ACTION" == "promote" ]]; then
-    DEFAULT="service-2"
+    DEFAULT="$(first_to_promote "${IN_FLIGHT[@]}")"
     echo
-    echo "  Both are rolling out. service-2 goes first: service-1 calls it."
+    echo "  Several are rolling out. ${DEFAULT} goes first$(called_by_note "$DEFAULT")."
   fi
   if [[ ${#IN_FLIGHT[@]} -eq 0 && "$ACTION" != "status" ]]; then
     echo
@@ -113,8 +128,8 @@ if [[ -z "$SVC" ]]; then
   fi
   echo
   ask "Choose a number or name" "$DEFAULT"
-  if [[ "$REPLY_VALUE" =~ ^[0-9]+$ && "$REPLY_VALUE" -ge 1 && "$REPLY_VALUE" -le ${#LFI_SERVICES[@]} ]]; then
-    SVC="${LFI_SERVICES[$((REPLY_VALUE - 1))]}"
+  if [[ "$REPLY_VALUE" =~ ^[0-9]+$ && "$REPLY_VALUE" -ge 1 && "$REPLY_VALUE" -le ${#LFI_RELEASABLE[@]} ]]; then
+    SVC="${LFI_RELEASABLE[$((REPLY_VALUE - 1))]}"
   else
     SVC="$REPLY_VALUE"
   fi
@@ -122,7 +137,9 @@ if [[ -z "$SVC" ]]; then
   PICKED_BY_MENU=1
 fi
 
-[[ " ${LFI_SERVICES[*]} " == *" $SVC "* ]] || usage_error "SVC must be service-1 or service-2 (got '${SVC}')."
+[[ " ${LFI_RELEASABLE[*]-} " == *" $SVC "* ]] || usage_error "SVC must be one of: ${LFI_RELEASABLE[*]-} (got '${SVC}')."
+locate "$SVC"
+[[ -n "$RO" ]] || usage_error "No Rollout found for $(app_name "$(promote_to "$SVC")" "$SVC") on ${CLUSTER_NAME}. Is it subscribed there, and is the cluster up?"
 
 # --- 4. Confirm, when a menu chose for you and the action changes traffic. ----
 if [[ "$PICKED_BY_MENU" -eq 1 && "$ACTION" != "status" && "${ASSUME_YES:-}" != "1" ]]; then
@@ -142,19 +159,20 @@ show_equivalent "gmake canary"
 case "$ACTION" in
   status)
     echo
-    echo "Watching ${CLUSTER_NAME}/${SVC}. Ctrl-C stops watching and does not affect the rollout."
+    echo "Watching ${CLUSTER_NAME}/${SVC} (Rollout ${RO} in ${NS}). Ctrl-C stops watching and does not affect the rollout."
     echo "When it shows Paused:  gmake canary ACTION=promote CLUSTER=${CLUSTER_NAME} SVC=${SVC}"
     echo "                       gmake canary ACTION=abort   CLUSTER=${CLUSTER_NAME} SVC=${SVC}"
-    exec kubectl argo rollouts get rollout "$SVC" -n "$NAMESPACE" --context "$CONTEXT" --watch
+    exec kubectl argo rollouts get rollout "$RO" -n "$NS" --context "$CONTEXT" --watch
     ;;
   promote)
-    kubectl argo rollouts promote "$SVC" -n "$NAMESPACE" --context "$CONTEXT"
+    kubectl argo rollouts promote "$RO" -n "$NS" --context "$CONTEXT"
     STEPS=("gmake canary          choose 'watch' to follow it finish" "gmake status          check every build at once")
-    [[ "$SVC" == "service-2" ]] && STEPS=("gmake canary          now promote service-1 if it is in this release" "${STEPS[@]}")
+    DEPENDENTS="$(service_dependents "$SVC" | tr '\n' ' ')"
+    [[ -n "$DEPENDENTS" ]] && STEPS=("gmake canary          now promote ${DEPENDENTS}if it is in this release" "${STEPS[@]}")
     next_steps "${STEPS[@]}"
     ;;
   abort)
-    kubectl argo rollouts abort "$SVC" -n "$NAMESPACE" --context "$CONTEXT"
+    kubectl argo rollouts abort "$RO" -n "$NS" --context "$CONTEXT"
     echo
     echo "Canary removed from service. Stable is unaffected."
     echo "This does NOT undo the release: Git still points prod at the bad tag,"
