@@ -86,3 +86,62 @@ The two application repos that feed this one, each writing a single image tag in
 dev overlay:
 [lfi-service-1-app](https://github.com/mhonnczedz1/lfi-service-1-app) (gateway),
 [lfi-service-2-app](https://github.com/mhonnczedz1/lfi-service-2-app) (worker).
+
+## Creating a project from this template
+
+A project is this repository, a templates repository and the teams' config
+repositories. All of them are GitHub template repositories, so a new project starts with
+no history and none of the old project's tags or secrets.
+
+1. Create the repositories from the templates. `OLD` is the project you are copying
+   (owner and project name), `NEW` is the new one:
+   ~~~
+   OLD_OWNER=<owner>; OLD=lfi; NEW_OWNER=<owner>; NEW=<short>
+   gh repo create $NEW_OWNER/$NEW-infrastructure-gitops --template $OLD_OWNER/$OLD-infrastructure-gitops --public --clone
+   gh repo create $NEW_OWNER/$NEW-service-templates --template $OLD_OWNER/$OLD-service-templates --public --clone
+   for s in service-1 service-2; do
+     gh repo create $NEW_OWNER/$NEW-$s-config --template $OLD_OWNER/$OLD-$s-config --public --clone
+   done
+   ~~~
+2. Give the new templates repository its first tag, because a template copy carries
+   files and not tags, and every config repository pins one:
+   ~~~
+   cd $NEW-service-templates && git tag -a v1.0.0 -m "First release" && git push origin v1.0.0
+   ~~~
+3. Point the copied config repositories at the new templates repository:
+   ~~~
+   for s in service-1 service-2; do
+     cd $NEW-$s-config
+     grep -rl "github.com/$OLD_OWNER/$OLD-service-templates" . --include=kustomization.yaml \
+       | xargs sed -i '' "s#github.com/$OLD_OWNER/$OLD-service-templates#github.com/$NEW_OWNER/$NEW-service-templates#g"
+     git commit -am "point at the new templates repository" && git push
+     cd ..
+   done
+   ~~~
+   If you will give the new project a different namespace prefix (`--ns-prefix`), change it
+   in the config repositories too, because each environment kustomization names its namespace:
+   ~~~
+   grep -rl 'namespace: platform-' $NEW-service-1-config $NEW-service-2-config --include=kustomization.yaml \
+     | xargs sed -i '' "s#namespace: platform-#namespace: <prefix>-#g"
+   ~~~
+4. Create an S3 bucket for the new project's Terraform state, then, in the new GitOps repo:
+   ~~~
+   scripts/stamp.sh --owner <owner> --repo <new-repo> --project <short> --bucket <bucket>
+   scripts/stamp.sh --owner <owner> --repo <new-repo> --project <short> --bucket <bucket> --apply
+   scripts/check-contract.sh
+   ~~~
+5. Copy `.env.example` to `.env` and fill it in. Set `GITOPS_REPO_URL` to the new repository.
+   Set `ARGOCD_REPO_PAT` to a fine-grained token with Contents: Read on all of the new
+   owner's repositories, so a config repository made private stays readable (guide 4,
+   Task 20.2.5). Note its expiry date: an expired token stops ArgoCD reading anything.
+   If the new owner is a GitHub organization, also clear "Allow members to change
+   repository visibilities" under the organization's Member privileges.
+6. Bring up a cluster with `gmake up`. The two example services deploy from their
+   public images, so you have a working platform at once.
+7. Replace them: `gmake add-service` for each of yours, then delete the examples'
+   subscriptions (`platform/subscriptions/*/team-[12]-*.yaml`), regenerate
+   (`scripts/gen-appsets.sh`), and delete their config repositories.
+
+Each service repository's CI names its own config repository and the files to update
+(see the `promote` job). Copy an existing `ci.yaml` and change `IMAGE_NAME`,
+`SERVICE`, the config repository name and the path. `gmake add-service` prints the lines.
