@@ -87,3 +87,12 @@ variable "traefik_chart_version" {
   # The version recorded in Task 2.1.2. A Helm chart has no lock file either.
   default     = "41.6.1"
 }
+
+variable "argocd_repo_pat" {
+  type      = string
+  sensitive = true
+  # Empty means no credential: ArgoCD reads every repository anonymously, as it
+  # did before guide 4, and only public repositories work.
+  description = "Fine-grained PAT with Contents: Read on all of the owner's repositories. From .env via TF_VAR_argocd_repo_pat (guide 4, Task 20.2.5)."
+  default     = ""
+}

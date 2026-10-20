@@ -231,3 +231,37 @@ resource "helm_release" "traefik" {
 
   values = [file("${path.module}/values/traefik.yaml")]
 }
+
+# A credential template for every repository under the GitHub owner. ArgoCD
+# treats the url below as a prefix: any repository whose URL starts with it is
+# read with this token, including config repositories created later. It is what
+# keeps a config repository readable if its team makes it private.
+#
+# Not created when ARGOCD_REPO_PAT is empty. Everything then reads anonymously,
+# which works for public repositories only.
+resource "kubernetes_secret" "argocd_repo_creds" {
+  count = var.argocd_repo_pat == "" ? 0 : 1
+
+  metadata {
+    name = "github-owner-repos"
+    # argocd, not platform: this is ArgoCD's own configuration.
+    namespace = "argocd"
+    labels = {
+      # repo-creds, not repository: a template matched by URL prefix rather than
+      # a single repository. Omit the label and ArgoCD ignores the Secret.
+      "argocd.argoproj.io/secret-type" = "repo-creds"
+    }
+  }
+
+  data = {
+    type = "git"
+    # https://github.com/<owner>/, taken from the GitOps repo's URL.
+    url = regex("^https://github\\.com/[^/]+/", var.gitops_repo_url)
+    # For a GitHub PAT the username is ignored; the token is the password.
+    username = "git"
+    password = var.argocd_repo_pat
+  }
+
+  # ArgoCD's namespace has to exist first, and Helm creates it.
+  depends_on = [helm_release.argocd]
+}

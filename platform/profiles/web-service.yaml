@@ -1,0 +1,50 @@
+# web-service: a stateless service. A Rollout and its Service, an image tag that
+# CI writes, released through the canary. What is removed from Git is removed
+# from the cluster.
+#
+# The platform owns this file. A subscription names it with `profile:`, and
+# scripts/gen-appsets.sh builds that subscription's ApplicationSet from it.
+description: a stateless service, built by CI and released through the canary
+# gmake release, canary, rollback and status act on services of this profile.
+releasable: true
+# The keys a team may set under `overrides:` in an environment's env.yaml, and
+# the type each must have. Nothing else is accepted: scripts/check-contract.sh
+# --online rejects any other key. Adding one is a platform change: list it here
+# and use it in templatePatch below, in the same pull request.
+overridable:
+  # Read this environment's manifests at a tag, branch or commit instead of
+  # the repository's HEAD. A team's own freeze during an incident.
+  targetRevision: string
+  # false lets someone change the environment by hand without ArgoCD putting
+  # it back. Useful for poking at dev; a bad idea in prod.
+  selfHeal: boolean
+# Merged into the ApplicationSet itself. Nothing extra for this profile.
+set: {}
+# Merged into the template every Application is made from.
+template:
+  metadata:
+    # Deleting the Application (unsubscribing, or a team removing an
+    # environment directory) deletes what it deployed.
+    finalizers:
+      - resources-finalizer.argocd.argoproj.io
+  spec:
+    syncPolicy:
+      automated:
+        prune: true
+        selfHeal: true
+      retry:
+        limit: 3
+        backoff:
+          duration: 10s
+          factor: 2
+          maxDuration: 2m
+# Applied to each Application after the template, with that environment's
+# values. This is the only place the overridable keys take effect. `dig` reads
+# a key that may be absent and falls back to the profile's default.
+templatePatch: |
+  spec:
+    source:
+      targetRevision: {{ dig "overrides" "targetRevision" "HEAD" . | quote }}
+    syncPolicy:
+      automated:
+        selfHeal: {{ dig "overrides" "selfHeal" true . }}

@@ -1,0 +1,57 @@
+# db-service: a database. A StatefulSet whose volume holds data Git does not
+# have. Nothing removed from Git is removed from the cluster: deleting a
+# database is something a person does on purpose, never a side effect.
+#
+# The platform owns this file. A subscription names it with `profile:`, and
+# scripts/gen-appsets.sh builds that subscription's ApplicationSet from it.
+description: a database; nothing is ever deleted automatically
+# Not released: it has no CI-written image tag. Its manifests change by commit.
+releasable: false
+# A team may only freeze its database at a revision. Nothing about sync or
+# deletion is the team's to loosen.
+overridable:
+  targetRevision: string
+# Merged into the ApplicationSet itself.
+set:
+  metadata:
+    annotations:
+      # root prunes whatever is removed from argocd/, and pruning this set
+      # would take the database's Application with it. This keeps the set
+      # until a person deletes it, so unsubscribing never removes it. root
+      # shows OutOfSync until then, which is the reminder.
+      argocd.argoproj.io/sync-options: Prune=false
+  spec:
+    syncPolicy:
+      # Deleting the set, or a directory disappearing from Git, leaves the
+      # Applications and everything they deployed alone. Losing a database to
+      # a bad merge is not a mistake Git history can undo.
+      preserveResourcesOnDeletion: true
+      applicationsSync: create-update
+# Merged into the template every Application is made from.
+template:
+  # No finalizer: deleting the Application must not delete the database.
+  spec:
+    syncPolicy:
+      automated:
+        # false: a file removed from Git must not delete the StatefulSet.
+        prune: false
+        selfHeal: true
+      retry:
+        limit: 3
+        backoff:
+          duration: 10s
+          factor: 2
+          maxDuration: 2m
+    ignoreDifferences:
+      # volumeClaimTemplates are immutable after creation and the API server
+      # returns them with defaulted fields, which ArgoCD reads as permanent
+      # drift. Without this the Application sits OutOfSync forever.
+      - group: apps
+        kind: StatefulSet
+        jsonPointers:
+          - /spec/volumeClaimTemplates
+# Applied to each Application after the template, with that environment's values.
+templatePatch: |
+  spec:
+    source:
+      targetRevision: {{ dig "overrides" "targetRevision" "HEAD" . | quote }}
