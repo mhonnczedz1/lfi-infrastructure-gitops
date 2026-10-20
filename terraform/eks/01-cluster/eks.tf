@@ -38,6 +38,16 @@ module "eks" {
     # the node group is created.
     vpc-cni = {
       before_compute = true
+      # Prefix delegation: each network interface hands out /28 prefixes
+      # instead of single IPs, which lifts the pod limit from the interface
+      # arithmetic (35 on a t3.large) toward the kubelet ceiling (110).
+      # WARM_PREFIX_TARGET = 1 keeps one spare prefix ready, not more.
+      configuration_values = jsonencode({
+        env = {
+          ENABLE_PREFIX_DELEGATION = "true"
+          WARM_PREFIX_TARGET       = "1"
+        }
+      })
     }
   }
 
