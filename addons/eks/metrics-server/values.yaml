@@ -1,0 +1,8 @@
+# Requests only what the controller needs on a one-node cluster, and a memory
+# limit so a leak cannot take the node. No CPU limit: throttling is recoverable.
+resources:
+  requests:
+    cpu: 25m
+    memory: 48Mi
+  limits:
+    memory: 128Mi
