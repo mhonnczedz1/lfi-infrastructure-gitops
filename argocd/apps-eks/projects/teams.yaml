@@ -1,0 +1,32 @@
+# What team-owned repositories are allowed to do on the eks cluster. Every
+# Application the ApplicationSets create belongs to this project, so this file
+# is the boundary between "the platform trusts the team's repo to say what runs"
+# and "the team's repo can run anything it likes".
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: teams
+  namespace: argocd
+spec:
+  description: Services whose manifests live in team-owned config repositories.
+  # Any repository of this owner whose name ends in -config. Teams name their
+  # own; scripts/check-contract.sh checks subscriptions against this pattern.
+  sourceRepos:
+    - https://github.com/mhonnczedz1/*-config.git
+  # Only the platform's namespaces. A team that sets namespace: kube-system in
+  # its env.yaml gets a sync error, not a deployment into kube-system.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: 'platform-*'
+  # Nothing cluster-wide: no Namespaces, ClusterRoles, CRDs or webhooks.
+  clusterResourceWhitelist: []
+  # Inside its namespaces a team may not grant itself access or lift its limits.
+  namespaceResourceBlacklist:
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
