@@ -15,7 +15,3 @@
 # Terraform provisions both clusters.
 /terraform/                      @mhonnczedz1
 
-# Removed in Task 20.4.5, together with what they protect.
-/releases/                       @mhonnczedz1
-/kubernetes/overlays/local/prod/ @mhonnczedz1
-/kubernetes/overlays/eks/prod/   @mhonnczedz1
