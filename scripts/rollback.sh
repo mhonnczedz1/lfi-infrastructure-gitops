@@ -45,7 +45,8 @@ cfg_git() { git -C "$CFG" "$@"; }
 
 # Where, inside the config repo, a cluster's prod environment keeps its tag:
 # <repoPath>/<cluster>/<to>/kustomization.yaml.
-prod_file() { echo "$(service_prefix "$2")$1/$(promote_to "$2")/kustomization.yaml"; } # <tree> <service>
+# The stage is the service's last promotion stage, or the one ENVIRONMENT names.
+prod_file() { echo "$(service_prefix "$2")$1/$(promote_to "$2" "${ENVIRONMENT:-}")/kustomization.yaml"; } # <tree> <service>
 
 # The tag a file holds at a given commit. Empty if the file does not exist there.
 tag_at() { # <commit> <path>
@@ -212,7 +213,7 @@ for tree in "${TREES[@]}"; do
     # point prod at an image that was never built.
     if ! recent_tags "$SVC" 40 | grep -qx "$to"; then
       # It may have only ever run in dev, so check there too.
-      dev_file="$(service_prefix "$SVC")$tree/$(promote_from "$SVC")/kustomization.yaml"
+      dev_file="$(service_prefix "$SVC")$tree/$(promote_from "$SVC" "${ENVIRONMENT:-}")/kustomization.yaml"
       if ! cfg_git log -S"newTag: ${to}" --format=%h -- "$dev_file" "$file" | grep -q .; then
         usage "build '$to' never appears in $SVC's config repository history. History from before the move to config repositories stays in the GitOps repository: for a build from then, edit the tag by hand in a PR."
       fi

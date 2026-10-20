@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fails loudly when the repo stops matching platform/registry.yaml, the profiles
-# and the subscriptions. Read-only. Run it after any structural change.
+# Fails loudly when the repo stops matching platform/registry.yaml,
+# platform/subscribers.yaml and the profiles. Read-only. Run it after any
+# structural change.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,12 +33,14 @@ k3d_name="$(yq '.clusters[] | select(.kind == "k3d") | .clusterName' "$REGISTRY"
 cfg_name="$(yq '.metadata.name' terraform/local/01-cluster/k3d-config.yaml)"
 [[ "$k3d_name" == "$cfg_name" ]] || fail "registry says the k3d cluster is '$k3d_name' but k3d-config.yaml says '$cfg_name'"
 
+# The profiles come from the templates repository at the registry's profilesRef.
 # Every profile says what a team may override, with a type, and uses each key
 # in its templatePatch. A key listed but not used would be accepted and do
 # nothing; a key used but not listed would be rejected for every team.
+[[ -z "$PROFILES_ERROR" ]] || fail "$PROFILES_ERROR"
 for pf in "$PROFILES"/*.yaml; do
-  [[ -f "$pf" ]] || { fail "no profiles in $(rel "$PROFILES")"; break; }
-  p="$(rel "$pf")"
+  [[ -f "$pf" ]] || { [[ -n "$PROFILES_ERROR" ]] || fail "no profiles in $PROFILES"; break; }
+  p="profiles/$(basename "$pf") at $PROFILES_REF"
   for key in $(yq '.overridable | keys | .[]' "$pf"); do
     type="$(K="$key" yq '.overridable[strenv(K)]' "$pf")"
     [[ "$type" == string || "$type" == boolean ]] || fail "$p: overridable $key has type '$type', expected string or boolean"
@@ -50,45 +53,55 @@ done
 # dashes. The longest is <cluster>-<identity> or <env>-<identity>.
 dns_ok() { [[ ${#1} -le 63 && "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; }
 
-# Every subscription is well formed, sits in the directory of a known cluster,
-# is named after its identity, and names a profile that exists and a config
-# repository the teams project trusts.
-for sf in $(subscription_files); do
-  f="$(rel "$sf")"
-  cluster="$(basename "$(dirname "$sf")")"
-  id="$(basename "$sf" .yaml)"
-  [[ " ${LFI_CLUSTERS[*]} " == *" $cluster "* ]] || fail "$f is under '$cluster', which is not a cluster in the registry"
+# Every subscription is well formed: the fields it must have, a unique identity
+# that makes valid names, a profile that exists, a config repository the teams
+# project trusts, clusters the registry knows, and dependencies that run on
+# every cluster it runs on.
+F="platform/subscribers.yaml"
+[[ -f "$SUBSCRIBERS" ]] || fail "$F is missing"
+n="$(yq '.subscribers | length' "$SUBSCRIBERS" 2>/dev/null || echo 0)"
+dups="$(yq '.subscribers[]? | .team + "-" + .name' "$SUBSCRIBERS" 2>/dev/null | sort | uniq -d | tr '\n' ' ')"
+[[ -z "$dups" ]] || fail "$F lists ${dups% } more than once"
+for ((i = 0; i < n; i++)); do
+  e="$F entry $((i + 1))"
   for key in name team profile configRepo; do
-    v="$(K="$key" yq '.[strenv(K)]' "$sf")"
-    [[ -n "$v" && "$v" != null ]] || fail "$f has no '$key'"
+    v="$(I=$i K="$key" yq '.subscribers[env(I)][strenv(K)]' "$SUBSCRIBERS")"
+    [[ -n "$v" && "$v" != null ]] || fail "$e has no '$key'"
   done
-  team="$(yq '.team' "$sf")"; name="$(yq '.name' "$sf")"
-  [[ "$id" == "$team-$name" ]] || fail "$f: the file must be named <team>-<name>.yaml, so $team-$name.yaml"
-  dns_ok "$cluster-$id" || fail "$f: '$cluster-$id' is not a valid name of 63 characters or fewer"
-  profile="$(yq '.profile' "$sf")"
-  [[ -f "$(profile_file "$profile")" ]] || fail "$f: profile '$profile' does not exist under platform/profiles/"
-  url="$(yq '.configRepo' "$sf")"
+  id="$(I=$i yq '.subscribers[env(I)] | .team + "-" + .name' "$SUBSCRIBERS")"
+  e="$F: $id"
+  profile="$(I=$i yq '.subscribers[env(I)].profile' "$SUBSCRIBERS")"
+  [[ -z "$PROFILES_ERROR" && ! -f "$(profile_file "$profile")" ]] && fail "$e: profile '$profile' is not in the templates repository at $PROFILES_REF"
+  url="$(I=$i yq '.subscribers[env(I)].configRepo' "$SUBSCRIBERS")"
   [[ "$url" =~ ^https://github\.com/$OWNER/[A-Za-z0-9._-]+-config\.git$ ]] \
-    || fail "$f: configRepo is $url; it must be https://github.com/$OWNER/<name>-config.git"
-  path="$(yq '.repoPath // ""' "$sf")"
+    || fail "$e: configRepo is $url; it must be https://github.com/$OWNER/<name>-config.git"
+  path="$(I=$i yq '.subscribers[env(I)].repoPath // ""' "$SUBSCRIBERS")"
   [[ -z "$path" || "$path" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] \
-    || fail "$f: repoPath '$path' must be a relative directory, with no leading or trailing slash"
-  for dep in $(yq '.dependsOn[]?' "$sf"); do
-    [[ " ${LFI_SERVICES[*]} " == *" $dep "* ]] || fail "$f: dependsOn $dep, which has no subscription"
-    # A service calls its dependency inside its own cluster, so the dependency
-    # must be subscribed on that cluster too, not merely somewhere.
-    service_on_cluster "$dep" "$cluster" || fail "$f: dependsOn $dep, which is not subscribed on the $cluster cluster"
+    || fail "$e: repoPath '$path' must be a relative directory, with no leading or trailing slash"
+  clusters="$(I=$i yq '.subscribers[env(I)].clusters[]?' "$SUBSCRIBERS")"
+  [[ -n "$clusters" ]] || fail "$e has no clusters: list where it runs, or remove the entry"
+  for cluster in $clusters; do
+    [[ " ${LFI_CLUSTERS[*]} " == *" $cluster "* ]] || fail "$e: cluster '$cluster' is not in the registry"
+    dns_ok "$cluster-$id" || fail "$e: '$cluster-$id' is not a valid name of 63 characters or fewer"
   done
-done
-
-# A service says the same thing about itself on every cluster it is on, or the
-# clusters would run different things under one name by accident.
-for svc in ${LFI_SERVICES[@]+"${LFI_SERVICES[@]}"}; do
-  for key in team profile configRepo repoPath; do
-    n="$(for f in "$SUBSCRIPTIONS"/*/"$svc".yaml; do
-      K="$key" yq '.[strenv(K)] // ""' "$f"
-    done | sort -u | wc -l | tr -d ' ')"
-    [[ "$n" == 1 ]] || fail "$svc is subscribed with $n different $key values"
+  # promotion is an ordered list of at least two stages, none repeated.
+  if [[ "$(I=$i yq '.subscribers[env(I)] | has("promotion")' "$SUBSCRIBERS")" == true ]]; then
+    stages="$(I=$i yq '.subscribers[env(I)].promotion[]?' "$SUBSCRIBERS")"
+    [[ "$(I=$i yq '.subscribers[env(I)].promotion | type' "$SUBSCRIBERS")" == '!!seq' ]] \
+      || fail "$e: promotion must be a list of stages, for example [dev, prod]"
+    [[ "$(echo "$stages" | grep -c .)" -ge 2 ]] || fail "$e: promotion needs at least two stages"
+    [[ -z "$(echo "$stages" | sort | uniq -d)" ]] || fail "$e: promotion names a stage twice"
+  fi
+  for dep in $(I=$i yq '.subscribers[env(I)].dependsOn[]?' "$SUBSCRIBERS"); do
+    if [[ " ${LFI_SERVICES[*]} " != *" $dep "* ]]; then
+      fail "$e: dependsOn $dep, which has no subscription"
+      continue
+    fi
+    # A service calls its dependency inside its own cluster, so the dependency
+    # must be subscribed on each of its clusters, not merely somewhere.
+    for cluster in $clusters; do
+      service_on_cluster "$dep" "$cluster" || fail "$e: dependsOn $dep, which is not subscribed on the $cluster cluster"
+    done
   done
 done
 
@@ -170,6 +183,16 @@ if [[ "$ONLINE" -eq 1 ]]; then
       done
       [[ "$found" -eq 1 ]] || fail "$svc has no environments under ${p:+$p/}$cluster/ in $url"
     done
+    # Every stage a released service promotes through is an environment it has,
+    # on every cluster it runs on: CI writes the first, releases move along them.
+    if service_releasable "$svc"; then
+      for cluster in $(service_clusters "$svc"); do
+        for stage in $(promotion_stages "$svc"); do
+          [[ -f "$dir/$cluster/$stage/env.yaml" ]] \
+            || fail "$svc promotes through $stage, but has no ${p:+$p/}$cluster/$stage/env.yaml in $url"
+        done
+      done
+    fi
     # A releasable service has its team's deny list beside its environments.
     if service_releasable "$svc" && [[ ! -f "$dir/denied-builds.yaml" ]]; then
       fail "$svc has no ${p:+$p/}denied-builds.yaml in $url"

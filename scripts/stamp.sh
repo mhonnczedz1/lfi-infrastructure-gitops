@@ -13,6 +13,11 @@ source "$SCRIPT_DIR/reg.sh"
 # reg.sh reads the project's current owner and name into OWNER and PROJECT.
 # Keep them under other names; the arguments below use OWNER and PROJECT for the new ones.
 OWNER_NOW="$OWNER"; PROJECT_NOW="$PROJECT"
+# The profiles this project uses, already fetched. The new project's templates
+# repository is a copy of this one, so these are its profiles too, and the new
+# repository need not exist yet for the sets to be regenerated below.
+[[ -z "$PROFILES_ERROR" ]] || { echo "ERROR: $PROFILES_ERROR." >&2; exit 1; }
+PROFILES_NOW="$PROFILES"
 
 usage() {
   cat >&2 <<EOF
@@ -60,7 +65,7 @@ BACKEND_FILES="$(grep -rl "$OLD_BUCKET" terraform --include=backend.tf 2>/dev/nu
 OWNER_FILES="$(grep -l "@$OLD_OWNER" .github/CODEOWNERS 2>/dev/null || true)"
 # Subscriptions name the config repositories, under the owner. A repository
 # named after the old project (<project>-...-config) is renamed after the new one.
-SUB_FILES="$(grep -rl "github.com/$OLD_OWNER/" platform/subscriptions 2>/dev/null || true)"
+SUB_FILES="$(grep -l "github.com/$OLD_OWNER/" platform/subscribers.yaml 2>/dev/null || true)"
 
 echo "Stamping $OLD_OWNER/$OLD_REPO as $OWNER/$REPO (project $PROJECT, namespaces ${NSP}-<environment>)"
 echo
@@ -68,7 +73,7 @@ echo "Registry:            platform/registry.yaml (owner, repo, bucket, prefixes
 echo "k3d cluster name:    $OLD_K3D -> $PROJECT   (terraform/local/01-cluster/k3d-config.yaml)"
 echo "Repo URL in:         $(echo "$URL_FILES" | grep -c . || true) file(s) under argocd/"
 echo "State bucket in:     $(echo "$BACKEND_FILES" | grep -c . || true) backend.tf file(s)"
-echo "Subscriptions:       $(echo "$SUB_FILES" | grep -c . || true) file(s) naming config repositories"
+echo "Subscriptions:       platform/subscribers.yaml, $(yq '.subscribers | length' platform/subscribers.yaml) entries naming config repositories"
 echo "Generated files:     ApplicationSets and teams project, regenerated from the registry"
 echo "Code owner in:       $(echo "$OWNER_FILES" | grep -c . || true) file(s)"
 
@@ -110,15 +115,16 @@ O="$OWNER" R="$REPO" B="$BUCKET" P="$PROJECT" N="$NSP" yq -i '
 
 # The ApplicationSets and the project hold the owner, repo and namespace prefix.
 # Regenerate them instead of editing them.
-scripts/gen-appsets.sh
+PROFILES="$PROFILES_NOW" scripts/gen-appsets.sh
 
 echo
-echo "Done. Verify:  scripts/check-contract.sh"
+echo "Done. Verify:  PROFILES=$PROFILES_NOW scripts/check-contract.sh"
+echo "(Until the new templates repository exists with the tag profilesRef names, point PROFILES at this copy.)"
 echo "Then commit, and create these GitHub repositories under $OWNER:"
 echo "  $REPO                          (this repository)"
 echo "  $PROJECT-service-templates     (from $OLD_OWNER/$OLD_PROJECT-service-templates)"
 # One per repository the subscriptions name, however many services share it.
-for repo in $(yq -N '.configRepo' $(ls platform/subscriptions/*/*.yaml) | sort -u); do
+for repo in $(yq '.subscribers[].configRepo' platform/subscribers.yaml | sort -u); do
   repo="$(basename "$repo" .git)"
   echo "  $repo           (from $OLD_OWNER/${repo/#$PROJECT-/$OLD_PROJECT-})"
 done

@@ -57,7 +57,8 @@ PAUSED=()        # "cluster/service" with a canary waiting for a decision
 ROLLING=()       # canary moving on its own
 DOWN=()          # clusters that could not be reached
 BEHIND=()        # Git and the cluster disagree with no canary explaining it
-DEV_AHEAD=0      # dev and prod differ in Git, so there is something to release
+DEV_AHEAD=0      # a stage is behind the one before it in Git: something to release
+AHEAD_INTO=()    # the stages that are behind
 
 for cluster in "${PICKED_CLUSTERS[@]}"; do
   ctx="$(cluster_context "$cluster")"
@@ -112,10 +113,12 @@ for cluster in "${PICKED_CLUSTERS[@]}"; do
       fi
       printf "  %-${W}s %-12s %-12s %-12s %s\n" "$svc" "$git_t" "$running" "$canary" "$state"
 
-      # Is there something in the "from" environment the "to" one has not had yet?
-      if [[ "$stage" == "$(promote_to "$svc")" ]]; then
-        dev_t="$(git_tag "$cluster" "$(promote_from "$svc")" "$svc")"
-        [[ -n "$dev_t" && "$git_t" != "?" && "$dev_t" != "$git_t" ]] && DEV_AHEAD=1
+      # Is this stage behind the one before it in the service's promotion list?
+      if prev="$(promote_from "$svc" "$stage" 2>/dev/null)"; then
+        dev_t="$(git_tag "$cluster" "$prev" "$svc")"
+        if [[ -n "$dev_t" && "$git_t" != "?" && "$dev_t" != "$git_t" ]]; then
+          DEV_AHEAD=1; AHEAD_INTO+=("$stage")
+        fi
       fi
     done
   done
@@ -162,7 +165,8 @@ if [[ ${#DOWN[@]} -gt 0 ]]; then
   done
 fi
 if [[ "$DEV_AHEAD" -eq 1 ]]; then
-  STEPS+=("gmake release         dev is ahead of prod in Git. Open a release PR to promote it.")
+  _into="$(printf '%s\n' "${AHEAD_INTO[@]}" | sort -u | tr '\n' ' ')"
+  STEPS+=("gmake release         ${_into% } is behind the stage before it in Git. Open a release PR to promote it (ENVIRONMENT=<stage> for one that is not last).")
 fi
 if [[ ${#STEPS[@]} -eq 0 ]]; then
   STEPS+=("gmake release         promote dev to prod when you are ready" \

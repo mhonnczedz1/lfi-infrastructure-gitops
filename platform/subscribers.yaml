@@ -1,0 +1,38 @@
+# Every service the platform runs, one entry per subscription: a team asking the
+# platform to run one deployable unit, under one of the profiles in the
+# templates repository, on the clusters it lists. The ApplicationSets are
+# generated from this file (scripts/gen-appsets.sh); ArgoCD never reads it.
+#
+# A service's identity is <team>-<name>. Keep the entries sorted by it, so that
+# two teams' changes rarely touch the same lines. To take a service off one
+# cluster, remove that cluster from its list; to take it off every cluster,
+# remove the entry. Then regenerate.
+subscribers:
+  - name: service-1
+    team: team-1
+    # Which platform template this runs under, and so which ArgoCD policy.
+    profile: web-service
+    # The repository ArgoCD reads this service's manifests from. The team owns it.
+    configRepo: https://github.com/mhonnczedz1/lfi-service-1-config.git
+    # Where in that repository: several services can share one repository.
+    repoPath: service-1
+    clusters: [local, eks]
+    dependsOn: [team-1-service-1-db, team-2-service-2]
+    description: the gateway. Calls service-2 and its database.
+    # The stages a build moves through, in order: CI writes the first, and each
+    # release moves it one step. Defaults to [dev, prod].
+    promotion: [dev, prod]
+  - name: service-1-db
+    team: team-1
+    profile: db-service
+    configRepo: https://github.com/mhonnczedz1/lfi-service-1-config.git
+    repoPath: service-1-db
+    clusters: [local, eks]
+    description: service-1's Postgres.
+  - name: service-2
+    team: team-2
+    profile: web-service
+    configRepo: https://github.com/mhonnczedz1/lfi-service-2-config.git
+    clusters: [local, eks]
+    description: the worker. Release and promote it first.
+    promotion: [dev, prod]

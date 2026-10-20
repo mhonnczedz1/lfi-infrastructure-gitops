@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scaffolds a service: one subscription per cluster in this repository, and the
+# Scaffolds a service: its entry in platform/subscribers.yaml, and the
 # service's manifests in a config repository (a sibling directory), copied from
 # the templates repository's scaffold for its profile. The repository can be new
 # (created here, ready to push) or one the team already has, in which case the
@@ -26,7 +26,8 @@ Usage: scripts/new-service.sh <name> --team <team> [options]
   --health <path>      web-service: liveness and readiness path (default /healthz)
   --storage <size>     db-service: volume size (default 1Gi)
   --description <text> one line for the menus (default: a service)
-  --envs <a,b>         environments to create (default: dev,prod)
+  --envs <a,b>         environments to create, in promotion order (default: dev,prod);
+                       CI writes the first, releases move along the rest
   --clusters <a,b>     clusters to subscribe to (default: all in the registry)
   --depends-on <id>    a service this one calls, by identity (repeatable)
 EOF
@@ -71,7 +72,8 @@ esac
 [[ "$REPO" =~ ^[A-Za-z0-9._-]+-config$ ]] || { echo "ERROR: --repo must end in -config." >&2; exit 1; }
 [[ -z "$RPATH" || "$RPATH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || { echo "ERROR: --path must be a relative directory." >&2; exit 1; }
 [[ " ${LFI_SERVICES[*]-} " != *" $ID "* ]] || { echo "ERROR: $ID already has a subscription." >&2; exit 1; }
-[[ -f "$(profile_file "$PROFILE")" ]] || { echo "ERROR: profile $PROFILE has no $(profile_file "$PROFILE")." >&2; exit 1; }
+[[ -z "$PROFILES_ERROR" ]] || { echo "ERROR: $PROFILES_ERROR." >&2; exit 1; }
+[[ -f "$(profile_file "$PROFILE")" ]] || { echo "ERROR: profile $PROFILE is not in the templates repository at $PROFILES_REF." >&2; exit 1; }
 for c in ${CLUSTERS//,/ }; do
   [[ " ${LFI_CLUSTERS[*]} " == *" $c "* ]] || { echo "ERROR: '$c' is not a cluster in the registry." >&2; exit 1; }
 done
@@ -201,33 +203,27 @@ fi
 git -C "$CFG" add -A
 git -C "$CFG" commit -q -m "scaffold $ID from $PROFILE $TEMPLATES_REF"
 
-# --- The subscriptions ---
-for cluster in ${CLUSTERS//,/ }; do
-  mkdir -p "$SUBSCRIPTIONS/$cluster"
-  {
-    echo "# $ID on the $cluster cluster: $TEAM asks the platform to run $NAME here."
-    echo "name: $NAME"
-    echo "team: $TEAM"
-    echo "# Which platform template this runs under, and so which ArgoCD policy."
-    echo "profile: $PROFILE"
-    echo "# The repository ArgoCD reads this service's manifests from. The team owns it."
-    echo "configRepo: https://github.com/$OWNER/$REPO.git"
-    if [[ -n "$RPATH" ]]; then
-      echo "# Where in that repository: several services can share one repository."
-      echo "repoPath: $RPATH"
-    fi
-    if [[ ${#DEPS[@]} -gt 0 ]]; then
-      echo "dependsOn: [$(IFS=,; echo "${DEPS[*]}" | sed 's/,/, /g')]"
-    fi
-    echo "description: $DESC"
-    if [[ "$PROFILE" == web-service ]]; then
-      echo "# Which environments a release promotes between."
-      echo "promotion:"
-      echo "  from: dev"
-      echo "  to: prod"
-    fi
-  } > "$SUBSCRIPTIONS/$cluster/$ID.yaml"
-done
+# --- The subscription: one entry in platform/subscribers.yaml ---
+# Written as a small file, then added to the list, which stays sorted by
+# identity so that two teams' additions rarely touch the same lines.
+entry="$(mktemp)"
+{
+  echo "name: $NAME"
+  echo "team: $TEAM"
+  echo "profile: $PROFILE"
+  echo "configRepo: https://github.com/$OWNER/$REPO.git"
+  [[ -z "$RPATH" ]] || echo "repoPath: $RPATH"
+  echo "clusters: [$(echo "$CLUSTERS" | sed 's/,/, /g')]"
+  if [[ ${#DEPS[@]} -gt 0 ]]; then
+    echo "dependsOn: [$(IFS=,; echo "${DEPS[*]}" | sed 's/,/, /g')]"
+  fi
+  echo "description: $DESC"
+  if [[ "$PROFILE" == web-service ]]; then
+    echo "promotion: [$(echo "$ENVS" | sed 's/,/, /g')]"
+  fi
+} > "$entry"
+E="$entry" yq -i '.subscribers += [load(strenv(E))] | .subscribers |= sort_by(.team + "-" + .name)' "$SUBSCRIBERS"
+rm -f "$entry"
 
 # --- Its ApplicationSet ---
 # After the cutover (guide 4, Task 20.3.6) every subscription needs its own
@@ -238,7 +234,7 @@ if ls -d argocd/apps-*/appsets/subscriptions >/dev/null 2>&1; then
   echo "Wrote its ApplicationSet under argocd/apps-<cluster>/appsets/subscriptions/."
 fi
 
-echo "Created $ID ($PROFILE) in $DIR and subscriptions on: ${CLUSTERS//,/ }."
+echo "Created $ID ($PROFILE) in $DIR and subscribed it on: ${CLUSTERS//,/ }."
 echo
 echo "Next:"
 if [[ "$NEW_REPO" -eq 1 ]]; then
@@ -252,10 +248,10 @@ if [[ "$PROFILE" == web-service ]]; then
   echo "  2. In the service's own repository, point its CI at the config repository (guide 4, Task 20.3.7 shows the edit):"
   echo "       the promote job checks out $OWNER/$REPO and edits"
   for cluster in ${CLUSTERS//,/ }; do
-    echo "         ${P}$cluster/dev/kustomization.yaml"
+    echo "         ${P}$cluster/${ENVS%%,*}/kustomization.yaml"
   done
 else
   echo "  2. Nothing for CI: a database has no image tag to move."
 fi
-echo "  3. Here: scripts/check-contract.sh --online, commit the subscriptions and the set (git add platform argocd), merge."
+echo "  3. Here: scripts/check-contract.sh --online, commit the subscription and the set (git add platform argocd), merge."
 echo "     ArgoCD creates <env>-$ID on its own."
