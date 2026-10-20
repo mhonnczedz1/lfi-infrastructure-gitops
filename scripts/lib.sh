@@ -2,14 +2,15 @@
 # Shared prompts for the gmake commands. Sourced by the scripts, never run.
 #
 # Every command asks the same few questions in the same way:
-#   which cluster   local (k3d-platform), eks (lfi-eks), or both where it makes sense
-#   which service   service-1, service-2, or both where it makes sense
-#   which stage     dev, prod, or both
+#   which cluster   a cluster in platform/registry.yaml, or both where it makes sense
+#   which service   a subscribed service whose profile is released (web-service),
+#                   or both (meaning all of them) where it makes sense
+#   which stage     an environment the services have, or both
 #
 # A question is skipped when its variable is already set, so the same command
 # works interactively and in a script:
 #   gmake release                              asks everything
-#   gmake release CLUSTER=eks SVC=service-1    asks nothing
+#   gmake release CLUSTER=eks SVC=team-1-service-1    asks nothing
 # With no terminal (a pipe, CI) a missing answer is an error with a hint, never
 # a prompt that waits forever.
 #
@@ -18,14 +19,29 @@
 # After a prompted run, show_equivalent prints the command that would have
 # skipped the questions, so the interactive form teaches the scripted one.
 
-LFI_CLUSTERS=(local eks)
-LFI_SERVICES=(service-1 service-2)
-LFI_STAGES=(dev prod)
+# LFI_CLUSTERS, LFI_SERVICES, LFI_RELEASABLE, NAMESPACE_PREFIX and the
+# cluster_*, service_* and promote_* readers come from platform/registry.yaml,
+# platform/profiles/ and platform/subscriptions/, so adding a service or a
+# cluster never means editing this file.
+source "$(dirname "${BASH_SOURCE[0]}")/reg.sh"
+
+# The environments that exist: every environment any released service has on
+# any cluster, found in the config repositories checked out next to this one.
+# Teams choose their own, so this cannot be a fixed list. Empty if no config
+# repo is cloned.
+LFI_STAGES=()
+for _s in ${LFI_RELEASABLE[@]+"${LFI_RELEASABLE[@]}"}; do
+  for _c in "${LFI_CLUSTERS[@]}"; do
+    for _e in $(service_envs "$_s" "$_c"); do
+      [[ " ${LFI_STAGES[*]-} " == *" $_e "* ]] || LFI_STAGES+=("$_e")
+    done
+  done
+done
 
 PICKED_CLUSTERS=()
 PICKED_SERVICES=()
 PICKED_STAGES=()
-EQUIV=""        # grows as questions are answered, e.g. " CLUSTER=eks SVC=service-1"
+EQUIV=""        # grows as questions are answered, e.g. " CLUSTER=eks SVC=team-1-service-1"
 
 is_tty() { [[ -t 0 ]]; }
 
@@ -46,14 +62,6 @@ usage_error() {
     fi
   } >&2
   exit 1
-}
-
-cluster_context() {
-  case "$1" in
-    local) echo "k3d-platform" ;;
-    eks)   echo "lfi-eks" ;;
-    *)     return 1 ;;
-  esac
 }
 
 cluster_title() { echo "$1 ($(cluster_context "$1"))"; }
@@ -162,14 +170,14 @@ cluster_state_of() { local v="STATE_$1"; echo "${!v:-}"; }
 pick_service() {
   local what="$1" allow_both="$2"
   menu_label() { echo "$1"; }
+  [[ ${#LFI_RELEASABLE[@]} -gt 0 ]] || usage_error "No subscribed service has a released profile."
   menu_note() {
     case "$1" in
-      service-1) echo "the gateway. Calls service-2." ;;
-      service-2) echo "the worker. Release and promote it first." ;;
-      both)      echo "service-1 and service-2" ;;
+      both) echo "${LFI_RELEASABLE[*]}" ;;
+      *)    service_description "$1" ;;
     esac
   }
-  pick_generic "service" "Which service do you want to ${what}?" "$allow_both" "${SVC:-}" "" "${LFI_SERVICES[@]}"
+  pick_generic "service" "Which service do you want to ${what}?" "$allow_both" "${SVC:-}" "" "${LFI_RELEASABLE[@]}"
   PICKED_SERVICES=("${PICKED[@]}")
   [[ -z "${SVC:-}" ]] && EQUIV+=" SVC=${PICKED_CHOICE}"
   return 0
@@ -179,17 +187,49 @@ pick_service() {
 pick_stage() {
   local what="$1" allow_both="$2"
   menu_label() { echo "$1"; }
+  [[ ${#LFI_STAGES[@]} -gt 0 ]] \
+    || usage_error "No environments found. Clone each service's config repository next to this repository."
   menu_note() {
     case "$1" in
-      dev)  echo "follows every build automatically" ;;
-      prod) echo "changes only when a release PR is merged" ;;
-      both) echo "dev and prod" ;;
+      both) echo "${LFI_STAGES[*]}" ;;
+      *)    echo "" ;;
     esac
   }
   pick_generic "environment" "Which environment do you want to ${what}?" "$allow_both" "${ENVIRONMENT:-}" "" "${LFI_STAGES[@]}"
   PICKED_STAGES=("${PICKED[@]}")
   [[ -z "${ENVIRONMENT:-}" ]] && EQUIV+=" ENVIRONMENT=${PICKED_CHOICE}"
   return 0
+}
+
+# first_to_promote <service...>: of the services given, the first that another of
+# them depends on, or the first one given if none does. Dependencies go first so
+# each canary judgment is about one change.
+first_to_promote() {
+  local s d
+  for s in "$@"; do
+    for d in "$@"; do
+      [[ "$d" == "$s" ]] && continue
+      [[ " $(service_deps "$d" | tr '\n' ' ') " == *" $s "* ]] && { echo "$s"; return 0; }
+    done
+  done
+  echo "$1"
+}
+
+# called_by_note <service>: ": it is called by team-1-service-1", or nothing.
+called_by_note() {
+  local d
+  d="$(service_dependents "$1" | tr '\n' ' ')"
+  [[ -n "$d" ]] && echo ": it is called by ${d% }"
+  return 0
+}
+
+# app_rollout <context> <application>: "<namespace> <rollout>" for the Rollout an
+# Application deployed, or nothing. The Rollout's name is the team's choice, so
+# it is read from what ArgoCD reports the Application manages, never guessed.
+app_rollout() {
+  kubectl --context "$1" -n argocd get application "$2" --request-timeout=4s \
+    -o jsonpath='{.spec.destination.namespace}{" "}{.status.resources[?(@.kind=="Rollout")].name}{"\n"}' 2>/dev/null \
+    | awk 'NF == 2' || true
 }
 
 # show_equivalent <command>: only when a question was actually asked.
