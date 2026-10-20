@@ -1,0 +1,10 @@
+# team-1-service-1-db on the eks cluster: team-1 asks the platform to run service-1-db here.
+name: service-1-db
+team: team-1
+# Which platform template this runs under, and so which ArgoCD policy.
+profile: db-service
+# The repository ArgoCD reads this service's manifests from. The team owns it.
+configRepo: https://github.com/mhonnczedz1/lfi-service-1-config.git
+# Where in that repository: several services can share one repository.
+repoPath: service-1-db
+description: service-1's Postgres.
