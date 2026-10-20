@@ -1,0 +1,12 @@
+# team-3-demo on the local cluster: team-3 asks the platform to run demo here.
+name: demo
+team: team-3
+# Which platform template this runs under, and so which ArgoCD policy.
+profile: web-service
+# The repository ArgoCD reads this service's manifests from. The team owns it.
+configRepo: https://github.com/mhonnczedz1/lfi-demo-config.git
+description: a throwaway demo
+# Which environments a release promotes between.
+promotion:
+  from: dev
+  to: prod
