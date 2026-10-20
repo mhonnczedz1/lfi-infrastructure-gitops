@@ -8,16 +8,15 @@
 #     gmake rollback CLUSTER=eks SVC=service-1 TO=26W39B2
 #   Without a terminal, a missing argument is an error with a hint, never a prompt.
 #   One cluster per rollback: whether to go back is a per-cluster judgment.
-#   <service>  a service with a subscription (gmake status lists them)
+#   <service>  service-1 or service-2
 #   <to>       what to go back to, in any of three forms:
 #                a build name     26W39B2
 #                a release name   2026-W38  or  2026-W40-B3
 #                a commit hash    7e25e45 (prod's tag as of that commit)
 #
 # A rollback is a Git commit, like every other change here: it sets newTag in
-# the prod environment of the service's config repository back to an older value
-# and ArgoCD does the rest. The change goes through a PR in that repository, so
-# the team's own review rules still apply.
+# the prod overlay back to an older value and ArgoCD does the rest. The change
+# goes through a PR, so the prod gate (CODEOWNERS) still applies.
 #
 # It does not touch releases/denied-builds.yaml. See the warning printed at the
 # end: until dev moves on, the next `gmake release` promotes the same build again.
@@ -35,32 +34,35 @@ TREES=(local)
 SVC="${1:-${SVC:-}}"
 TO="${2:-${TO:-}}"
 
-cd "$SCRIPT_DIR/.."
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
 
-# The config repository of the service being rolled back. Set once the service
-# is chosen, below. Every Git command in this script goes through cfg_git.
-CFG=""
-cfg_git() { git -C "$CFG" "$@"; }
-
-# Where, inside the config repo, a cluster's prod environment keeps its tag.
-prod_file() { echo "$1/$(promote_to "$2")/app/kustomization.yaml"; }
+prod_file() { echo "kubernetes/overlays/$1/prod/$2/kustomization.yaml"; }
 
 # The tag a file holds at a given commit. Empty if the file does not exist there.
 tag_at() { # <commit> <path> <service>
-  cfg_git show "$1:$2" 2>/dev/null \
+  git show "$1:$2" 2>/dev/null \
     | SVC="$3" yq '.images[] | select(.name == strenv(SVC)) | .newTag' 2>/dev/null || true
 }
 
-# Prod's tag for a service as of a commit.
+# Prod's tag for a service as of a commit, whichever layout the commit had.
+# Commits before the restructure keep the overlay at kubernetes/overlays/prod,
+# not kubernetes/overlays/local/prod, so try the current path and then that one.
 prod_tag_at() { # <commit> <tree> <service>
-  tag_at "$1" "$(prod_file "$2" "$3")" "$3"
+  local t
+  t="$(tag_at "$1" "$(prod_file "$2" "$3")" "$3")"
+  if [[ -z "$t" && "$2" == "local" ]]; then
+    t="$(tag_at "$1" "kubernetes/overlays/prod/$3/kustomization.yaml" "$3")"
+  fi
+  echo "$t"
 }
 
 # Prod tags this service has had, newest first, deduplicated. Used for hints and
 # to check that a named build really existed.
 recent_tags() { # <service> [count]
   local svc="$1" count="${2:-5}" c
-  cfg_git log --format=%H -n 60 -- "$(prod_file "${TREES[0]}" "$svc")" | while read -r c; do
+  git log --format=%H -n 60 -- "$(prod_file "${TREES[0]}" "$svc")" \
+      "kubernetes/overlays/prod/$svc/kustomization.yaml" | while read -r c; do
     prod_tag_at "$c" "${TREES[0]}" "$svc"
   done | awk 'NF && !seen[$0]++' | head -n "$count"
 }
@@ -68,12 +70,8 @@ recent_tags() { # <service> [count]
 recent_releases() { # [count]
   # --no-merges: a merge commit's body repeats the PR title, which would list
   # "Merge pull request ..." lines. Only the release commits themselves count.
-  # The name is the subject without the partial-release scope (" [local / ...]")
-  # or the " (#12)" that a squash merge appends.
-  cfg_git log main --no-merges --format='%s' -n 200 \
-    | grep '^release(' \
-    | sed -e 's/^release([a-z0-9-]*): //' -e 's/ (#[0-9]*)$//' -e 's/ \[.*$//' \
-    | awk '!seen[$0]++' | head -n "${1:-5}"
+  git log main --no-merges --format='%s' -n 200 \
+    | grep '^release(prod): ' | sed 's/^release(prod): //' | awk '!seen[$0]++' | head -n "${1:-5}"
 }
 
 usage() {
@@ -98,6 +96,18 @@ usage() {
   exit 1
 }
 
+# Refuse a dirty tree, for the same reason release.sh does: a rollback commit
+# that quietly carries an unrelated change is the surprise this process avoids.
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: working tree is dirty. Commit or stash first." >&2
+  exit 1
+fi
+
+# Before any prompt, so the "prod is on ..." and recent-builds lists reflect main.
+git switch main >/dev/null 2>&1
+git pull --ff-only
+git fetch --quiet --prune origin
+
 # Interactive when a person is at the keyboard (stdin is a terminal). With
 # SVC and TO both given it behaves exactly as before, and in a pipe or CI with
 # either missing it still fails with the usage hint instead of waiting forever.
@@ -110,21 +120,6 @@ TREES=("${PICKED_CLUSTERS[0]}")
 CLUSTER_NAME="${TREES[0]}"
 pick_service "roll back" no
 SVC="${PICKED_SERVICES[0]}"
-
-CFG="$(service_config_dir "$SVC")"
-[[ -d "$CFG/.git" ]] || { echo "ERROR: $SVC's config repo is not checked out at $CFG." >&2; exit 1; }
-
-# Refuse a dirty tree, for the same reason release.sh does: a rollback commit
-# that quietly carries an unrelated change is the surprise this process avoids.
-if [[ -n "$(cfg_git status --porcelain)" ]]; then
-  echo "ERROR: $CFG has uncommitted changes. Commit or stash first." >&2
-  exit 1
-fi
-
-# Before any prompt, so the "prod is on ..." and recent-builds lists reflect main.
-cfg_git switch main >/dev/null 2>&1
-cfg_git pull --ff-only --quiet
-cfg_git fetch --quiet --prune origin
 
 if [[ -z "$TO" ]]; then
   if [[ "$INTERACTIVE" -ne 1 ]]; then usage "TO is required: the build, release or commit to go back to."; fi
@@ -164,7 +159,7 @@ elif [[ "$TO" =~ ^[0-9]{4}-W[0-9]{2}(-B[0-9]+)?(-[0-9]+)?$ ]]; then
   # A release name can match more than one commit: this repo has reused a
   # release branch within a week. Take the newest, which is the week's final
   # state, and say so.
-  MATCHES="$(cfg_git log main --no-merges -E --format=%h --grep="^release\([a-z0-9-]*\): ${TO}( \[[^]]*\])?( \(#[0-9]+\))?\$")"
+  MATCHES="$(git log main --no-merges --format=%h --grep="^release(prod): ${TO}\$")"
   COUNT="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
   if [[ "$COUNT" -eq 0 ]]; then
     usage "no release named '$TO'."
@@ -176,9 +171,9 @@ elif [[ "$TO" =~ ^[0-9]{4}-W[0-9]{2}(-B[0-9]+)?(-[0-9]+)?$ ]]; then
   fi
 elif [[ "$TO" =~ ^[0-9a-f]{7,40}$ ]]; then
   KIND="commit"
-  COMMIT="$(cfg_git rev-parse --verify --quiet "${TO}^{commit}")" \
-    || usage "'$TO' is not a commit in $SVC's config repository."
-  COMMIT="$(cfg_git rev-parse --short "$COMMIT")"
+  COMMIT="$(git rev-parse --verify --quiet "${TO}^{commit}")" \
+    || usage "'$TO' is not a commit in this repository."
+  COMMIT="$(git rev-parse --short "$COMMIT")"
 else
   usage "'$TO' is not a build name, a release name or a commit hash."
 fi
@@ -191,7 +186,8 @@ case "$KIND" in
   commit)  ASKED="commit ${COMMIT}" ;;
 esac
 
-# --- Resolve to a tag, per tree. ---
+# --- Resolve to a tag, per tree. Old commits predate overlays/local, so fall
+# back to the pre-restructure path. ---
 declare -a PLAN=()   # tree|file|from|to
 for tree in "${TREES[@]}"; do
   file="$(prod_file "$tree" "$SVC")"
@@ -207,9 +203,10 @@ for tree in "${TREES[@]}"; do
     # point prod at an image that was never built.
     if ! recent_tags "$SVC" 40 | grep -qx "$to"; then
       # It may have only ever run in dev, so check there too.
-      dev_file="$tree/$(promote_from "$SVC")/app/kustomization.yaml"
-      if ! cfg_git log -S"newTag: ${to}" --format=%h -- "$dev_file" "$file" | grep -q .; then
-        usage "build '$to' never appears in $SVC's config repository history. History from before the move to config repositories stays in the GitOps repository: for a build from then, edit the tag by hand in a PR."
+      dev_file="kubernetes/overlays/$tree/dev/$SVC/kustomization.yaml"
+      if ! git log -S"newTag: ${to}" --format=%h -- "$dev_file" "$file" \
+            "kubernetes/overlays/dev/$SVC/kustomization.yaml" "kubernetes/overlays/prod/$SVC/kustomization.yaml" | grep -q .; then
+        usage "build '$to' never appears in $SVC's history."
       fi
     fi
   else
@@ -256,18 +253,18 @@ FIRST_TO="${PLAN[0]##*|}"
 BASE_BRANCH="rollback/${CLUSTER_NAME}-${SVC}-${FIRST_TO}"
 BRANCH="$BASE_BRANCH"
 n=2
-while cfg_git show-ref --verify --quiet "refs/heads/${BRANCH}" \
-   || cfg_git show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; do
+while git show-ref --verify --quiet "refs/heads/${BRANCH}" \
+   || git show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; do
   BRANCH="${BASE_BRANCH}-${n}"
   n=$((n + 1))
 done
-cfg_git switch -q -c "$BRANCH"
+git switch -c "$BRANCH"
 
 BODY="## Rollback ${CLUSTER_NAME}/${SVC}"$'\n\n'"| Tree | From | To |"$'\n'"|---|---|---|"$'\n'
 for entry in "${PLAN[@]}"; do
   IFS='|' read -r tree file from to <<< "$entry"
-  yq -i '(.images[] | select(.name == "'"$SVC"'") | .newTag) = "'"$to"'"' "$CFG/$file"
-  cfg_git add "$file"
+  yq -i '(.images[] | select(.name == "'"$SVC"'") | .newTag) = "'"$to"'"' "$file"
+  git add "$file"
   BODY+="| \`$tree\` | \`$from\` | \`$to\` |"$'\n'
 done
 BODY+=$'\n'"Asked for: \`${TO}\` (${ASKED})"$'\n\n'
@@ -276,14 +273,14 @@ BODY+="\`gmake release\` promotes the same build again. After merging, the prod 
 BODY+="pauses at 50 percent like any release: \`gmake canary\`."
 
 FROM_TAG="$(echo "${PLAN[0]}" | cut -d'|' -f3)"
-cfg_git commit -q -m "rollback(prod): ${CLUSTER_NAME}/${SVC} ${FROM_TAG} -> ${FIRST_TO}"
-cfg_git push -q -u origin "$BRANCH"
+git commit -m "rollback(prod): ${CLUSTER_NAME}/${SVC} ${FROM_TAG} -> ${FIRST_TO}"
+git push -u origin "$BRANCH"
 
-(cd "$CFG" && gh pr create --title "rollback(prod): ${CLUSTER_NAME}/${SVC} ${FROM_TAG} -> ${FIRST_TO}" --body "$BODY" --base main)
+gh pr create --title "rollback(prod): ${CLUSTER_NAME}/${SVC} ${FROM_TAG} -> ${FIRST_TO}" --body "$BODY" --base main
 
-cfg_git switch -q main
+git switch main
 echo
-echo "Rollback PR opened in $(basename "$CFG"). Review the diff, then merge it."
+echo "Rollback PR opened. Review the diff, then merge it."
 echo
 echo "WARNING: ${FROM_TAG} is not on the deny list. Until dev moves past it, the next"
 echo "         gmake release will promote it again. Add it to releases/denied-builds.yaml"

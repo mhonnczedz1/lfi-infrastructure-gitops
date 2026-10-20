@@ -7,21 +7,12 @@
 # defaults are decisions, no-defaults are secrets or environment.
 # ---------------------------------------------------------------------------
 
-variable "cluster_name" {
-  type        = string
-  description = "k3d cluster name, from the registry via TF_VAR_cluster_name."
-}
-
 variable "kube_context" {
   type        = string
-  description = "kubectl context to target. From the registry, and checked against cluster_name."
-
-  # Was an unchecked default. k3d names the context k3d-<cluster>, so a context
-  # that does not fit the cluster name is a stray one. Refuse it.
-  validation {
-    condition     = var.kube_context == "k3d-${var.cluster_name}"
-    error_message = "kube_context must be k3d-<cluster_name>. Refusing to plan against another cluster."
-  }
+  # Must match `kube_context` output by 01-cluster. Nothing enforces that
+  # automatically, so a mismatch here is silently applying to another cluster.
+  description = "kubectl context to target. Must match the 01-cluster output."
+  default     = "k3d-platform"
 }
 
 # --- Supplied from .env by the Makefile. No defaults on purpose. ------------
@@ -93,13 +84,4 @@ variable "argocd_host" {
   # so no server.rootpath configuration is needed.
   description = "Hostname Traefik routes to ArgoCD, reachable on port 8080."
   default     = "argocd.localhost"
-}
-
-variable "argocd_repo_pat" {
-  type      = string
-  sensitive = true
-  # Empty means no credential: ArgoCD reads every repository anonymously, as it
-  # did before guide 4, and only public repositories work.
-  description = "Fine-grained PAT with Contents: Read on all of the owner's repositories. From .env via TF_VAR_argocd_repo_pat (guide 4, Task 20.2.5)."
-  default     = ""
 }

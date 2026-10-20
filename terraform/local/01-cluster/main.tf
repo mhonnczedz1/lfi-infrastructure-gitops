@@ -18,7 +18,8 @@ terraform {
 
 variable "cluster_name" {
   type        = string
-  description = "Name of the k3d cluster. Kube context becomes k3d-<name>. From the registry."
+  description = "Name of the k3d cluster. Kube context becomes k3d-<name>."
+  default     = "platform"
 }
 
 # `locals` are computed values, not inputs. path.module is this directory, so

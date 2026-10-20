@@ -7,38 +7,30 @@ ArgoCD, Argo Rollouts.
 [local-full-infrastructure](https://github.com/mhonnczedz1/local-full-infrastructure).
 Read the guide for why it is shaped this way; clone this only to compare against your own.
 
-## The rules
+## The two rules
 
 **Nobody runs `kubectl apply` against the cluster.** ArgoCD reconciles continuously, so
 a manual change is reverted within a reconciliation window, silently and with no error.
 Deploying means committing.
 
-**This repository holds no service manifests.** A service is a subscription under
-`platform/subscriptions/` that points at a config repository its team owns, and the
-ApplicationSets read that repository. Prod is protected by the team's own repository.
-CODEOWNERS here covers what the platform owns: `platform/`, `argocd/`, `addons/`,
-`releases/`, `scripts/` and `terraform/`.
+**`kubernetes/overlays/prod/` is gated.** CODEOWNERS requires review on that path and on
+`terraform/`, so prod changes only through a reviewed release pull request. Dev is
+continuous and deliberately unowned.
 
 ## Layout
 
-~~~
-platform/
-  registry.yaml          project identity and clusters
-  subscriptions/         one file per service per cluster: where its config repo is
-  overrides/             optional platform adjustments to a subscription
+```
 terraform/
-  local/, eks/           01-cluster and 02-platform for each cluster
-argocd/
-  apps-<cluster>/        what root watches: generated ApplicationSets and the teams
-                         project (scripts/gen-appsets.sh writes them)
-addons/<cluster>/        third-party software, one directory per add-on
-scripts/                 the commands behind gmake, the registry readers, the contract
-                         check, the generator, the scaffolder and the stamp script
-releases/                denied-builds.yaml, the veto list.
-~~~
-
-Service manifests live in each service's own `<project>-<service>-config` repository, and
-the components they build on live in `<project>-service-templates`.
+  01-cluster/     creates the k3d cluster. null and local providers only.
+  02-platform/    namespaces, secrets, ArgoCD, Argo Rollouts, the root Application.
+kubernetes/
+  base/           one definition of each workload. No namespace, no image tag.
+  overlays/       dev and prod. Only the differences: namespace, tag, replicas, host.
+argocd/apps/      six child Applications, three per environment.
+scripts/          the commands behind gmake: lib.sh (shared prompts), cluster.sh, status.sh,
+                  release.sh, rollback.sh, canary.sh.
+releases/         denied-builds.yaml, the veto list.
+```
 
 Terraform is split into two root modules because the `kubernetes` and `helm` providers
 need a reachable cluster at plan time, and the cluster does not exist during the first
@@ -83,61 +75,3 @@ The two application repos that feed this one, each writing a single image tag in
 dev overlay:
 [lfi-service-1-app](https://github.com/mhonnczedz1/lfi-service-1-app) (gateway),
 [lfi-service-2-app](https://github.com/mhonnczedz1/lfi-service-2-app) (worker).
-
-## Creating a project from this template
-
-A project is this repository, a templates repository and one config repository per
-service. All of them are GitHub template repositories, so a new project starts with
-no history and none of the old project's tags or secrets.
-
-1. Create the repositories from the templates. `OLD` is the project you are copying
-   (owner and project name), `NEW` is the new one:
-   ~~~
-   OLD_OWNER=<owner>; OLD=lfi; NEW_OWNER=<owner>; NEW=<short>
-   gh repo create $NEW_OWNER/$NEW-infrastructure-gitops --template $OLD_OWNER/$OLD-infrastructure-gitops --public --clone
-   gh repo create $NEW_OWNER/$NEW-service-templates --template $OLD_OWNER/$OLD-service-templates --public --clone
-   for s in service-1 service-2; do
-     gh repo create $NEW_OWNER/$NEW-$s-config --template $OLD_OWNER/$OLD-$s-config --public --clone
-   done
-   ~~~
-2. Give the new templates repository its first tag, because a template copy carries
-   files and not tags, and every config repository pins one:
-   ~~~
-   cd $NEW-service-templates && git tag -a v1.0.0 -m "First release" && git push origin v1.0.0
-   ~~~
-3. Point the copied config repositories at the new templates repository:
-   ~~~
-   for s in service-1 service-2; do
-     cd $NEW-$s-config
-     grep -rl "github.com/$OLD_OWNER/$OLD-service-templates" . --include=kustomization.yaml \
-       | xargs sed -i '' "s#github.com/$OLD_OWNER/$OLD-service-templates#github.com/$NEW_OWNER/$NEW-service-templates#g"
-     git commit -am "point at the new templates repository" && git push
-     cd ..
-   done
-   ~~~
-   If you will give the new project a different namespace prefix (`--ns-prefix`), change it
-   in the config repositories too, because each environment kustomization names its namespace:
-   ~~~
-   grep -rl 'namespace: platform-' $NEW-service-1-config $NEW-service-2-config --include=kustomization.yaml \
-     | xargs sed -i '' "s#namespace: platform-#namespace: <prefix>-#g"
-   ~~~
-4. Create an S3 bucket for the new project's Terraform state, then, in the new GitOps repo:
-   ~~~
-   scripts/stamp.sh --owner <owner> --repo <new-repo> --project <short> --bucket <bucket>
-   scripts/stamp.sh --owner <owner> --repo <new-repo> --project <short> --bucket <bucket> --apply
-   scripts/check-contract.sh
-   ~~~
-5. Copy `.env.example` to `.env` and fill it in. Set `GITOPS_REPO_URL` to the new repository.
-   Set `ARGOCD_REPO_PAT` to a fine-grained token with Contents: Read on all of the new
-   owner's repositories, so a config repository made private stays readable (guide 4,
-   Task 20.2.5). Note its expiry date: an expired token stops ArgoCD reading anything.
-   If the new owner is a GitHub organization, also clear "Allow members to change
-   repository visibilities" under the organization's Member privileges.
-6. Bring up a cluster with `gmake up`. The two example services deploy from their
-   public images, so you have a working platform at once.
-7. Replace them: `gmake add-service` for each of yours, then delete the examples'
-   subscriptions (`platform/subscriptions/*/service-*.yaml`) and their config repositories.
-
-Each service repository's CI names its own config repository and the files to update
-(see the `promote` job). Copy an existing `ci.yaml` and change `IMAGE_NAME`,
-`SERVICE` and the config repository name. `gmake add-service` prints the lines.

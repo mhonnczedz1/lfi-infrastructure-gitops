@@ -1,17 +1,12 @@
-# Changes under these paths require review from the listed owner. This repository
-# is the platform's. A service's prod environment is protected by that service's
-# own config repository, not here.
+# Changes under this path require review from the listed owner. This is the
+# prod release gate, and it is why environment branches are unnecessary: a
+# directory can be protected just as effectively as a branch.
+/kubernetes/overlays/local/prod/    @mhonnczedz1
+/kubernetes/overlays/eks/prod/      @mhonnczedz1
 
-# Subscriptions decide what exists. The ApplicationSets and the teams project
-# decide how it is deployed and what a team may do. Add-ons are platform software.
-/platform/                       @mhonnczedz1
-/argocd/                         @mhonnczedz1
-/addons/                         @mhonnczedz1
+# Terraform provisions both environments, so it gets the same treatment.
+/terraform/                   @mhonnczedz1
 
-# The platform's veto list, and the commands that act on it.
-/releases/                       @mhonnczedz1
-/scripts/                        @mhonnczedz1
-
-# Terraform provisions both clusters.
-/terraform/                      @mhonnczedz1
-
+# Deliberately unowned: dev is meant to be continuous, and requiring review
+# here would defeat the purpose of automated promotion.
+# /kubernetes/overlays/local/dev/

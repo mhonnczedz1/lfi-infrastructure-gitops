@@ -7,22 +7,14 @@
 # defaults are decisions, no-defaults are secrets or environment.
 # ---------------------------------------------------------------------------
 
-variable "cluster_name" {
-  type        = string
-  description = "EKS cluster name, from the registry via TF_VAR_cluster_name."
-}
-
 variable "kube_context" {
   type        = string
-  description = "kubectl context to target. Must equal the cluster name, from the registry."
+  description = "kubectl context to target. Pinned to the EKS cluster."
+  default     = "lfi-eks"
 
-  # The guard that stops a stray context from receiving this apply. It now
-  # compares against the registry's cluster name instead of a literal, so it
-  # survives the cluster being renamed. Referencing another variable inside a
-  # validation needs Terraform 1.9, which required_version already demands.
   validation {
-    condition     = var.kube_context == var.cluster_name
-    error_message = "kube_context must equal cluster_name. Refusing to plan against another cluster."
+    condition     = var.kube_context == "lfi-eks"
+    error_message = "This module only targets the lfi-eks context. Refusing to plan against another cluster."
   }
 }
 
@@ -94,13 +86,4 @@ variable "traefik_chart_version" {
   description = "Pinned traefik Helm chart version, from Task 2.1.2."
   # The version recorded in Task 2.1.2. A Helm chart has no lock file either.
   default     = "41.6.1"
-}
-
-variable "argocd_repo_pat" {
-  type      = string
-  sensitive = true
-  # Empty means no credential: ArgoCD reads every repository anonymously, as it
-  # did before guide 4, and only public repositories work.
-  description = "Fine-grained PAT with Contents: Read on all of the owner's repositories. From .env via TF_VAR_argocd_repo_pat (guide 4, Task 20.2.5)."
-  default     = ""
 }
