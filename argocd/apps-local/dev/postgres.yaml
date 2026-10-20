@@ -6,8 +6,6 @@ metadata:
   # identifier.
   name: postgres-dev
   namespace: argocd
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
