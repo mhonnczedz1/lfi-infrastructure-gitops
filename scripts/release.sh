@@ -6,13 +6,16 @@
 #   Asks which cluster (local, eks, or both) and which service (or both, meaning
 #   every released service). Name them up front and nothing is asked:
 #     gmake release CLUSTER=eks SVC=team-1-service-1
+#   ENVIRONMENT=<stage> releases into that stage from the one before it in each
+#   service's promotion list; with none, into the last stage (prod).
 #   DRY_RUN=1 shows what would be released and stops, touching nothing.
 #   Clusters are allowed to drift apart: releasing to one leaves the other where
 #   it was, until you release to it.
 #
-# Reads the image tag the "from" environment (dev, unless the service's
-# subscription says otherwise) is running and writes it into the "to"
-# environment (prod). Nothing is built: the images already exist in GHCR and
+# Reads the image tag the stage before the target holds (for promotion: [dev,
+# prod], dev) and writes it into the target (prod). One step at a time: with
+# [dev, staging, prod], ENVIRONMENT=staging moves dev to staging, and the next
+# release moves staging to prod. Nothing is built: the images already exist in GHCR and
 # have been serving dev traffic all week. This script only moves a reference.
 #
 # Each service's manifests live in its team's config repository, at its
@@ -30,6 +33,9 @@ pick_service "release" yes
 TREES=("${PICKED_CLUSTERS[@]}")
 SERVICES=("${PICKED_SERVICES[@]}")
 show_equivalent "gmake release"
+# The stage to release into. Empty means each service's last stage.
+TARGET="${ENVIRONMENT:-}"
+[[ "$TARGET" != both ]] || usage_error "ENVIRONMENT for a release is one stage to release into, not both."
 
 SCOPE="${TREES[*]} / ${SERVICES[*]}"
 PARTIAL=0
@@ -67,9 +73,16 @@ tag_in() { yq '.images[0].newTag // ""' "$1"; } # <file>
 # whether there is a release to make and can build the PR bodies.
 declare -a CHANGES=()    # svc|cluster|from|to
 declare -a BLOCKED=()    # svc|cluster|tag|reason
+TARGETED=0               # services that have the target stage
 for svc in "${SERVICES[@]}"; do
   dir="$(service_dir "$svc")"
-  from_env="$(promote_from "$svc")"; to_env="$(promote_to "$svc")"
+  if ! to_env="$(promote_to "$svc" "$TARGET")"; then
+    stages="$(promotion_stages "$svc" | tr '\n' ' ')"
+    echo "NOTE: $TARGET is not a stage $svc promotes into (its stages: ${stages% }). Skipped." >&2
+    continue
+  fi
+  TARGETED=$((TARGETED + 1))
+  from_env="$(promote_from "$svc" "$TARGET")"
   for tree in "${TREES[@]}"; do
     if ! service_on_cluster "$svc" "$tree"; then
       echo "NOTE: $svc is not subscribed on $tree. Skipped." >&2
@@ -109,13 +122,17 @@ fi
 
 # "Nothing changed" and "everything I would have shipped is poisoned" are
 # different states and must never print the same message.
+if [[ "$TARGETED" -eq 0 ]]; then
+  echo "ERROR: none of ${SERVICES[*]} promotes into ${TARGET}. Nothing released." >&2
+  exit 1
+fi
 if [[ ${#CHANGES[@]} -eq 0 && ${#BLOCKED[@]} -gt 0 ]]; then
   echo "ERROR: every candidate build is denied. Nothing released." >&2
   exit 1
 fi
 
 if [[ ${#CHANGES[@]} -eq 0 ]]; then
-  echo "Nothing to release: prod already matches dev for ${SCOPE}."
+  echo "Nothing to release: ${TARGET:-the last stage} already matches the stage before it for ${SCOPE}."
   next_steps "gmake status           compare dev and prod on every cluster" \
              "gmake release          choose a different cluster or service"
   exit 0
@@ -136,7 +153,7 @@ PRS=()
 for svc in "${SERVICES[@]}"; do
   cfg="$(service_config_dir "$svc")"
   prefix="$(service_prefix "$svc")"
-  to_env="$(promote_to "$svc")"
+  to_env="$(promote_to "$svc" "$TARGET")" || continue
 
   # This service's changes only.
   MINE=()

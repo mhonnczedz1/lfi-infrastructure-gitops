@@ -11,7 +11,7 @@
 # These change no desired state, which is why they are commands rather than
 # commits. They advance or unwind a convergence toward what Git already says.
 #
-# "Prod" is each service's promotion target (promotion.to in its subscription).
+# "Prod" is each service's last promotion stage, or the stage ENVIRONMENT names.
 # The namespace and the Rollout's name are read from the Application ArgoCD made
 # for it, because both are the team's choice.
 set -euo pipefail
@@ -61,7 +61,9 @@ CONTEXT="$(cluster_context "$CLUSTER_NAME")"
 # Sets NS and RO; both empty if ArgoCD has no such Application.
 locate() { # <service>
   NS=""; RO=""
-  read -r NS RO <<< "$(app_rollout "$CONTEXT" "$(app_name "$(promote_to "$1")" "$1")")" || true
+  local env
+  env="$(promote_to "$1" "${ENVIRONMENT:-}")" || return 0
+  read -r NS RO <<< "$(app_rollout "$CONTEXT" "$(app_name "$env" "$1")")" || true
   NS="${NS:-}"; RO="${RO:-}"
 }
 
@@ -139,7 +141,7 @@ fi
 
 [[ " ${LFI_RELEASABLE[*]-} " == *" $SVC "* ]] || usage_error "SVC must be one of: ${LFI_RELEASABLE[*]-} (got '${SVC}')."
 locate "$SVC"
-[[ -n "$RO" ]] || usage_error "No Rollout found for $(app_name "$(promote_to "$SVC")" "$SVC") on ${CLUSTER_NAME}. Is it subscribed there, and is the cluster up?"
+[[ -n "$RO" ]] || usage_error "No Rollout found for ${SVC}'s ${ENVIRONMENT:-last} stage on ${CLUSTER_NAME}. Is it subscribed there, is that one of its promotion stages, and is the cluster up?"
 
 # --- 4. Confirm, when a menu chose for you and the action changes traffic. ----
 if [[ "$PICKED_BY_MENU" -eq 1 && "$ACTION" != "status" && "${ASSUME_YES:-}" != "1" ]]; then

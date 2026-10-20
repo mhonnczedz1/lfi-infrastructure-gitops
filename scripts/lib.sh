@@ -21,8 +21,8 @@
 
 # LFI_CLUSTERS, LFI_SERVICES, LFI_RELEASABLE, NAMESPACE_PREFIX and the
 # cluster_*, service_* and promote_* readers come from platform/registry.yaml,
-# platform/profiles/ and platform/subscriptions/, so adding a service or a
-# cluster never means editing this file.
+# platform/subscribers.yaml and the profiles in the templates repository, so
+# adding a service or a cluster never means editing this file.
 source "$(dirname "${BASH_SOURCE[0]}")/reg.sh"
 
 # The environments that exist: every environment any released service has on

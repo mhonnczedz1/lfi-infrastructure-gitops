@@ -13,9 +13,9 @@ Read the guide for why it is shaped this way; clone this only to compare against
 a manual change is reverted within a reconciliation window, silently and with no error.
 Deploying means committing.
 
-**This repository holds no service manifests.** A service is a team's subscription under
-`platform/subscriptions/`, to one of the profiles under `platform/profiles/`, pointing at
-a directory in a config repository the team owns. The generated ApplicationSets read that
+**This repository holds no service manifests.** A service is a team's entry in
+`platform/subscribers.yaml`, taking one of the profiles in `<project>-service-templates`
+on the clusters it lists, and pointing at a directory in a config repository the team owns. The generated ApplicationSets read that
 directory. Prod, and the list of builds that must never reach it, are protected by the
 team's own repository. CODEOWNERS here covers what the platform owns: `platform/`,
 `argocd/`, `addons/`, `scripts/` and `terraform/`.
@@ -24,11 +24,10 @@ team's own repository. CODEOWNERS here covers what the platform owns: `platform/
 
 ~~~
 platform/
-  registry.yaml          project identity and clusters
-  profiles/              what a service may be (web-service, db-service): the ArgoCD
-                         policy, and the overrides a team may set
-  subscriptions/         one file per service per cluster, <team>-<name>.yaml: its
-                         profile, and where its manifests are
+  registry.yaml          project identity, clusters, and profilesRef: the tag of the
+                         templates repository whose profiles/ the generator reads
+  subscribers.yaml       every subscription: its team, profile, clusters and where its
+                         manifests are
 terraform/
   local/, eks/           01-cluster and 02-platform for each cluster
 argocd/
@@ -40,8 +39,8 @@ scripts/                 the commands behind gmake, the registry readers, the co
                          check, the generator, the scaffolder and the stamp script
 ~~~
 
-Service manifests live in the teams' `*-config` repositories, and the components they
-build on live in `<project>-service-templates`.
+Service manifests live in the teams' `*-config` repositories. The profiles, and the
+components and scaffolds that go with them, live in `<project>-service-templates`.
 
 Terraform is split into two root modules because the `kubernetes` and `helm` providers
 need a reachable cluster at plan time, and the cluster does not exist during the first
@@ -104,7 +103,7 @@ no history and none of the old project's tags or secrets.
    done
    ~~~
 2. Give the new templates repository its first tag, because a template copy carries
-   files and not tags, and every config repository pins one:
+   files and not tags, and every config repository and the registry's `profilesRef` pin one:
    ~~~
    cd $NEW-service-templates && git tag -a v1.0.0 -m "First release" && git push origin v1.0.0
    ~~~
@@ -139,7 +138,7 @@ no history and none of the old project's tags or secrets.
 6. Bring up a cluster with `gmake up`. The two example services deploy from their
    public images, so you have a working platform at once.
 7. Replace them: `gmake add-service` for each of yours, then delete the examples'
-   subscriptions (`platform/subscriptions/*/team-[12]-*.yaml`), regenerate
+   entries from `platform/subscribers.yaml` (`team-1` and `team-2`), regenerate
    (`scripts/gen-appsets.sh`), and delete their config repositories.
 
 Each service repository's CI names its own config repository and the files to update
